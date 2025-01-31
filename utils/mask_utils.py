@@ -10,11 +10,13 @@ def calculate_iou(mask1, mask2):
     return intersection / union if union > 0 else 0
 
 
-def filter_overlapping_masks(masks, keys, iou_threshold=0.8):
+def filter_overlapping_masks(masks, keys, iou_threshold=0.8, del_method="smaller"):
     """
-    マスクのリストから、IoUが閾値以上のペアのうち、小さい方を削除する。
+    マスクのリストから、IoUが閾値以上のペアのうち、小さい方、または番号が後のものを削除する。
     :param masks: list of torch.Tensor (shape: [1, H, W], dtype=bool)
+    :param keys: list, マスクに対応する識別キー
     :param iou_threshold: float, IoUの閾値
+    :param del_method: str, "smaller"（面積の小さいほう）または "later"（番号が後のもの）を削除
     :return: tuple (filtered_masks, removed_indices)
     """
     keep = [True] * len(masks)  # マスクを保持するかどうかのフラグ
@@ -26,19 +28,25 @@ def filter_overlapping_masks(masks, keys, iou_threshold=0.8):
         for j in range(i + 1, len(masks)):
             if not keep[j]:  # すでに削除予定のものはスキップ
                 continue
-            
+
             iou = calculate_iou(torch.from_numpy(masks[i]), torch.from_numpy(masks[j]))
 
             if iou >= iou_threshold:
-                # 面積を比較し、小さい方を削除
-                area_i = torch.from_numpy(masks[i]).sum().item()
-                area_j = torch.from_numpy(masks[j]).sum().item()
+                if del_method == "smaller":
+                    # 面積を比較し、小さい方を削除
+                    area_i = torch.from_numpy(masks[i]).sum().item()
+                    area_j = torch.from_numpy(masks[j]).sum().item()
 
-                if area_i < area_j:
-                    keep[i] = False
-                    removed_indices.append(keys[i])
-                    break  # i が削除された場合、他との比較は不要
-                else:
+                    if area_i < area_j:
+                        keep[i] = False
+                        removed_indices.append(keys[i])
+                        break  # i が削除された場合、他との比較は不要
+                    else:
+                        keep[j] = False
+                        removed_indices.append(keys[j])
+
+                elif del_method == "later":
+                    # 番号が後のもの（インデックス j のほう）を削除
                     keep[j] = False
                     removed_indices.append(keys[j])
 

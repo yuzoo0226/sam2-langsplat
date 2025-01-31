@@ -55,6 +55,7 @@ class TrackingViewer:
         self.predictor_image = build_sam2(self.model_cfg, self.checkpoint, apply_postprocessing=False)
         mask_generator = SAM2AutomaticMaskGenerator(self.predictor_image)
 
+        self.is_viewer = is_viewer
         if is_viewer:
             self._setup_gui()
 
@@ -196,11 +197,11 @@ class TrackingViewer:
             cv2.imshow("mask image", mask_image)
             cv2.waitKey(0)
         if filename is not None:
-            ic(os.path.join(self.image_dir, filename).replace(".", f"_{anns_obj_id}."))
-            cv2.imwrite(os.path.join(self.image_dir, filename).replace("renamed_images", "renamed_images_anns").replace(".", f"_{anns_obj_id}."), mask_image*255)
+            ic(os.path.join(self.image_dir, filename).replace(".", f"_{str(anns_obj_id).zfill(5)}."))
+            cv2.imwrite(os.path.join(self.image_dir, filename).replace("renamed_images", "renamed_images_anns").replace(".", f"_{str(anns_obj_id).zfill(5)}."), mask_image*255)
 
-        # self.set_main_image(mask_image)
-
+        if self.is_viewer:
+            self.set_main_image(mask_image)
         return mask_image
 
     @staticmethod
@@ -282,7 +283,8 @@ class TrackingViewer:
             image = cv2.imread(os.path.join(self.image_dir, self.frame_names[0]))
             h, w, ch = image.shape
 
-            ann_obj_id = -1
+            ann_obj_id = 0
+            past_ann_obj_id = 0
             ann_frame_idx = 0
             video_segments = {}  # video_segments contains the per-frame segmentation results
             labels = np.array([1], np.int32)
@@ -293,6 +295,13 @@ class TrackingViewer:
                     out_obj_ids, out_mask_logits = self.mask_point_generation(ann_frame_idx, ann_obj_id, height=h, width=w, num_points=16*16)
                     ann_obj_id = out_obj_ids[-1]
 
+                    # Tracking
+                    # TODO: 重なりは先に消す
+                    for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state):
+                        video_segments[out_frame_idx] = {
+                            out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy() for i, out_obj_id in enumerate(out_obj_ids)
+                        }
+
                 else:
                     combined_mask = create_combined_mask(video_segments[ann_frame_idx])
                     enclosed_contours = find_enclosed_regions(combined_mask)
@@ -300,25 +309,33 @@ class TrackingViewer:
                     ic(points)
 
                     for idx, point in enumerate(points):
+                        ann_obj_id = ann_obj_id + idx
                         _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_points_or_box(
                             inference_state=self.inference_state,
                             frame_idx=ann_frame_idx,
-                            obj_id=ann_obj_id+idx,
+                            obj_id=ann_obj_id,
                             points=[point],
                             labels=labels,
                         )
+                    ic(out_obj_ids)
 
                 # Tracking
                 for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state):
                     if out_frame_idx >= ann_frame_idx:  # 以前までに検出した画像からの削除は行わない．
-                        video_segments[out_frame_idx] = {
-                            out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy() for i, out_obj_id in enumerate(out_obj_ids)
-                        }
+                        for i, out_obj_id in enumerate(out_obj_ids):
+                            if out_obj_id > past_ann_obj_id:
+                                video_segments[out_frame_idx][out_obj_id] = (out_mask_logits[i] > 0.0).cpu().numpy()
 
                 for out_frame_idx, (_, segments) in enumerate(video_segments.items()):
                     if out_frame_idx >= ann_frame_idx:  # 以前までに検出した画像からの削除は行わない．
                         # del overlap masks
-                        _, overlaped_indices = filter_overlapping_masks(list(segments.values()), list(segments.keys()))
+                        if ann_frame_idx == 0:
+                            # 残っているobj_idを覚えておく
+                            _, overlaped_indices = filter_overlapping_masks(list(segments.values()), list(segments.keys()), del_method="smaller")
+                        else:
+                            # 消すときに，obj_idを引き継ぐ
+                            # frame1では24が残っていて，frame2で24と27のIoUが閾値以上だった場合，27のmaskを残しながら，IDを24にする
+                            _, overlaped_indices = filter_overlapping_masks(list(segments.values()), list(segments.keys()), del_method="later")
 
                         for overlaped_index in overlaped_indices:
                             del segments[overlaped_index]
@@ -330,6 +347,8 @@ class TrackingViewer:
 
                 # self.del_inference_state_image()
                 # input(f"Complete: {self.frame_names[ann_frame_idx]}  Next >>>")
+                ann_obj_id = out_obj_ids[-1]
+                past_ann_obj_id = out_obj_ids[-1]
 
     def _setup_gui(self) -> None:
         """Setup the Dear PyGUI layout."""
