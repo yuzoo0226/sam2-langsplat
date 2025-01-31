@@ -23,7 +23,7 @@ from utils.mask_utils import calculate_iou, filter_overlapping_masks, create_com
 class TrackingViewer:
     """A GUI application for viewing sorted images with navigation support."""
 
-    def __init__(self, image_dir: str, sam_checkpoint: str, sam_config: str) -> None:
+    def __init__(self, image_dir: str, sam_checkpoint: str, sam_config: str, is_viewer=True) -> None:
         """Initialize the image viewer with the given image folder."""
         self.image_dir = image_dir
         self.video_path = None
@@ -55,7 +55,8 @@ class TrackingViewer:
         self.predictor_image = build_sam2(self.model_cfg, self.checkpoint, apply_postprocessing=False)
         mask_generator = SAM2AutomaticMaskGenerator(self.predictor_image)
 
-        self._setup_gui()
+        if is_viewer:
+            self._setup_gui()
 
     def _load_images(self, ext="png") -> Dict[int, str]:
         """Load and sort images from the specified folder."""
@@ -198,7 +199,7 @@ class TrackingViewer:
             ic(os.path.join(self.image_dir, filename).replace(".", f"_{anns_obj_id}."))
             cv2.imwrite(os.path.join(self.image_dir, filename).replace("renamed_images", "renamed_images_anns").replace(".", f"_{anns_obj_id}."), mask_image*255)
 
-        self.set_main_image(mask_image)
+        # self.set_main_image(mask_image)
 
         return mask_image
 
@@ -386,6 +387,8 @@ if __name__ == "__main__":
     parser.add_argument("--input_dir", "-i", default="/mnt/home/yuga-y/usr/splat_ws/datasets/lerf_ovs/figurines/renamed_images/", type=str)
     parser.add_argument("--model", "-m", default="./checkpoints/sam2.1_hiera_large.pt", type=str)
     parser.add_argument("--config", "-c", default="configs/sam2.1/sam2.1_hiera_l.yaml", type=str)
+    parser.add_argument("--viewer_disable", "-v", action="store_false")
     args = parser.parse_args()
 
-    viewer = TrackingViewer(args.input_dir, args.model, args.config)
+    viewer = TrackingViewer(args.input_dir, args.model, args.config, args.viewer_disable)
+    viewer.segment_video_callback("temp", "temp")

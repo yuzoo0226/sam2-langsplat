@@ -10,7 +10,7 @@ def calculate_iou(mask1, mask2):
     return intersection / union if union > 0 else 0
 
 
-def filter_overlapping_masks(masks, keys, iou_threshold=0.5):
+def filter_overlapping_masks(masks, keys, iou_threshold=0.8):
     """
     マスクのリストから、IoUが閾値以上のペアのうち、小さい方を削除する。
     :param masks: list of torch.Tensor (shape: [1, H, W], dtype=bool)
