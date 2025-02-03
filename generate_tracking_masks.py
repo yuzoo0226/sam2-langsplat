@@ -2,6 +2,7 @@ import os
 import cv2
 import glob
 import copy
+import time
 # import imageio
 import argparse
 import numpy as np
@@ -16,14 +17,14 @@ import torch
 # from segment_anything import SamPredictor, sam_model_registry
 from sam2.build_sam import build_sam2_video_predictor, build_sam2
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
-from utils.grid_generator import generate_uniform_grid, draw_points_on_image
-from utils.mask_utils import calculate_iou, filter_overlapping_masks, create_combined_mask, find_enclosed_regions, get_centroids
+from utils.grid_generator import generate_uniform_grid, draw_points_on_image, auto_grid_generator
+from utils.mask_utils import make_anns_image, apply_mask_to_rgba_image, apply_mask_to_image, calculate_iou, filter_overlapping_masks, create_combined_mask, find_enclosed_regions, get_centroids
 
 
 class TrackingViewer:
     """A GUI application for viewing sorted images with navigation support."""
 
-    def __init__(self, image_dir: str, sam_checkpoint: str, sam_config: str, is_viewer=True) -> None:
+    def __init__(self, image_dir: str, sam_checkpoint: str, sam_config: str, is_viewer=True, is_debug=True) -> None:
         """Initialize the image viewer with the given image folder."""
         self.image_dir = image_dir
         self.video_path = None
@@ -52,10 +53,10 @@ class TrackingViewer:
         self.checkpoint = "./checkpoints/sam2.1_hiera_large.pt"
         self.model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
         self.predictor_video = build_sam2_video_predictor(self.model_cfg, self.checkpoint)
-        self.predictor_image = build_sam2(self.model_cfg, self.checkpoint, apply_postprocessing=False)
-        mask_generator = SAM2AutomaticMaskGenerator(self.predictor_image)
+        self.predictor_image = build_sam2(self.model_cfg, self.checkpoint)
 
         self.is_viewer = is_viewer
+        self.debug = is_debug
         if is_viewer:
             self._setup_gui()
 
@@ -183,15 +184,36 @@ class TrackingViewer:
         else:
             dpg.set_value(self.next_image_texture, self.blank_sub_image)
 
-    def mask_to_numpy(self, mask, obj_id=None, random_color=False, visualize=False, filename=None, anns_obj_id=None):
-        if random_color:
-            color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
+    def mask_to_numpy(self, mask, image, obj_id=None, random_color=False, visualize=False, filename=None, anns_obj_id=None, borders=True, use_rgb=False):
+        if use_rgb:
+            if random_color:
+                color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
+            else:
+                cmap = plt.get_cmap("tab10")
+                cmap_idx = 0 if obj_id is None else obj_id
+                color = np.array([*cmap(cmap_idx)[:3], 0.6])
+            h, w = mask.shape[-2:]
+
+            mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
+
         else:
-            cmap = plt.get_cmap("tab10")
-            cmap_idx = 0 if obj_id is None else obj_id
-            color = np.array([*cmap(cmap_idx)[:3], 0.6])
-        h, w = mask.shape[-2:]
-        mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
+            if random_color:
+                # ランダムなグレースケール値 (0~1 の範囲)
+                gray_value = np.random.random()
+                color = np.array([gray_value, 0.6])  # [グレースケール値, アルファ値]
+            else:
+                cmap = plt.get_cmap("tab10")
+                cmap_idx = 0 if obj_id is None else obj_id
+                gray_value = np.mean(cmap(cmap_idx)[:3])  # RGB を平均してグレースケールに変換
+                color = np.array([gray_value, 0.6])  # [グレースケール値, アルファ値]
+            h, w = mask.shape[-2:]
+            mask_image = mask.reshape(h, w, 1) * color[0]
+
+        if borders:
+            contours, _ = cv2.findContours(mask_image.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE) 
+            # Try to smooth contours
+            contours = [cv2.approxPolyDP(contour, epsilon=0.01, closed=True) for contour in contours]
+            cv2.drawContours(mask_image, contours, -1, (0, 0, 1, 0.4), thickness=1)
 
         if visualize:
             cv2.imshow("mask image", mask_image)
@@ -218,20 +240,67 @@ class TrackingViewer:
         ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0, 0, 0, 0), lw=2))
 
     def mask_point_generation(self, ann_frame_idx, ann_obj_id, height, width, num_points=128, image=None):
-        points = generate_uniform_grid(height=height, width=width, num_points=num_points)
-        labels = np.array([1], np.int32)
-        for idx, point in enumerate(points):
-            if image is not None:
-                image = draw_points_on_image(image, points)
-                self.set_main_image(image/255)
+        # points = generate_uniform_grid(height=height, width=width, num_points=num_points)
+        points, segmentation_array, anns = auto_grid_generator(
+            image,
+            self.predictor_image,
+            # min_mask_region_area=100,
+            pred_iou_thresh=0.9,
+            points_per_side=30,
+            crop_n_points_downscale_factor=0.9,
+            stability_score_thresh=0.95,
+            box_nms_thresh=0.7,
+            # use_m2m=True
+        )
 
-            _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_points_or_box(
+        keys = [i for i in range(len(points))]
+        _, removed_indices = filter_overlapping_masks(segmentation_array, keys)
+        ic(removed_indices)
+
+        # for idx, mask in enumerate(segmentation_array):
+        #     ic(idx, mask)
+        #     # anns_image = make_anns_image(anns, borders=False, specific_id=idx)
+        #     # self.set_main_image(anns_image)
+        #     anns_image = apply_mask_to_image(image, mask)
+        #     # self.set_main_image(anns_image)
+        #     cv2.imwrite("temp.png", anns_image)
+        #     # cv2.waitKey(0)
+        #     input("netx>>")
+
+        # labels = np.array([1], np.int32)
+        for idx in removed_indices:
+            np.delete(segmentation_array, idx)
+
+        for idx, mask in enumerate(segmentation_array):
+            # ic(mask)
+            if idx in removed_indices:
+                continue
+
+            _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_mask(
                 inference_state=self.inference_state,
                 frame_idx=ann_frame_idx,
                 obj_id=ann_obj_id+idx,
-                points=[point],
-                labels=labels,
+                mask=mask
             )
+
+        # for idx, point in enumerate(points):
+        #     _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_points_or_box(
+        #         inference_state=self.inference_state,
+        #         frame_idx=ann_frame_idx,
+        #         obj_id=ann_obj_id+idx,
+        #         points=[point],
+        #         labels=labels,
+        #     )
+
+        if image is not None:
+            for mask in out_mask_logits:
+                image = draw_points_on_image(image, points=points)
+                mask = (mask > 0.0).cpu().numpy()
+                ic(mask)
+                display_image = apply_mask_to_rgba_image(image, mask)
+                self.set_main_image(display_image/255)
+                if self.debug:
+                    time.sleep(0.2)
 
         # print(out_mask_logits)
         # mask_image = self.mask_to_numpy((out_mask_logits[0] > 0.0).cpu().numpy())
@@ -289,66 +358,49 @@ class TrackingViewer:
             video_segments = {}  # video_segments contains the per-frame segmentation results
             labels = np.array([1], np.int32)
 
-            for ann_frame_idx, filename in enumerate(self.frame_names):
-                if video_segments == {}:
-                    # Inital Frame
-                    out_obj_ids, out_mask_logits = self.mask_point_generation(ann_frame_idx, ann_obj_id, height=h, width=w, num_points=16*16)
-                    ann_obj_id = out_obj_ids[-1]
+            out_obj_ids, out_mask_logits = self.mask_point_generation(ann_frame_idx, ann_obj_id, height=h, width=w, num_points=16*16, image=image)
+            ann_obj_id = out_obj_ids[-1]
 
-                    # Tracking
-                    # TODO: 重なりは先に消す
-                    for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state):
-                        video_segments[out_frame_idx] = {
-                            out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy() for i, out_obj_id in enumerate(out_obj_ids)
-                        }
+            for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state):
+                video_segments[out_frame_idx] = {
+                    out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy() for i, out_obj_id in enumerate(out_obj_ids)
+                }
 
-                else:
-                    combined_mask = create_combined_mask(video_segments[ann_frame_idx])
-                    enclosed_contours = find_enclosed_regions(combined_mask)
-                    points = get_centroids(enclosed_contours)
-                    ic(points)
+                # else:
+                #     combined_mask = create_combined_mask(video_segments[ann_frame_idx])
+                #     enclosed_contours = find_enclosed_regions(combined_mask)
+                #     points = get_centroids(enclosed_contours)
+                #     ic(points)
 
-                    for idx, point in enumerate(points):
-                        ann_obj_id = ann_obj_id + idx
-                        _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_points_or_box(
-                            inference_state=self.inference_state,
-                            frame_idx=ann_frame_idx,
-                            obj_id=ann_obj_id,
-                            points=[point],
-                            labels=labels,
-                        )
-                    ic(out_obj_ids)
+                #     for idx, point in enumerate(points):
+                #         ann_obj_id = ann_obj_id + idx
+                #         _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_points_or_box(
+                #             inference_state=self.inference_state,
+                #             frame_idx=ann_frame_idx,
+                #             obj_id=ann_obj_id,
+                #             points=[point],
+                #             labels=labels,
+                #         )
+                #     ic(out_obj_ids)
 
-                # Tracking
-                for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state):
-                    if out_frame_idx >= ann_frame_idx:  # 以前までに検出した画像からの削除は行わない．
-                        for i, out_obj_id in enumerate(out_obj_ids):
-                            if out_obj_id > past_ann_obj_id:
-                                video_segments[out_frame_idx][out_obj_id] = (out_mask_logits[i] > 0.0).cpu().numpy()
+            # Tracking
+            for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state):
+                # if out_frame_idx >= ann_frame_idx:  # 以前までに検出した画像からの削除は行わない．
+                for i, out_obj_id in enumerate(out_obj_ids):
+                    # if out_obj_id > past_ann_obj_id:
+                    video_segments[out_frame_idx][out_obj_id] = (out_mask_logits[i] > 0.0).cpu().numpy()
 
-                for out_frame_idx, (_, segments) in enumerate(video_segments.items()):
-                    if out_frame_idx >= ann_frame_idx:  # 以前までに検出した画像からの削除は行わない．
-                        # del overlap masks
-                        if ann_frame_idx == 0:
-                            # 残っているobj_idを覚えておく
-                            _, overlaped_indices = filter_overlapping_masks(list(segments.values()), list(segments.keys()), del_method="smaller")
-                        else:
-                            # 消すときに，obj_idを引き継ぐ
-                            # frame1では24が残っていて，frame2で24と27のIoUが閾値以上だった場合，27のmaskを残しながら，IDを24にする
-                            _, overlaped_indices = filter_overlapping_masks(list(segments.values()), list(segments.keys()), del_method="later")
+            for out_frame_idx, (_, segments) in enumerate(video_segments.items()):
+                # if out_frame_idx == len(self.frame_names)-1:
+                output_filename = self.frame_names[out_frame_idx]
+                image = cv2.imread(os.path.join(self.image_dir, self.frame_names[out_frame_idx]))
+                for obj_idx, segment in segments.items():
+                    mask = self.mask_to_numpy(segment, image, filename=output_filename, anns_obj_id=obj_idx)
 
-                        for overlaped_index in overlaped_indices:
-                            del segments[overlaped_index]
-
-                    if ann_frame_idx == len(self.frame_names)-1:
-                        output_filename = self.frame_names[out_frame_idx]
-                        for obj_idx, segment in segments.items():
-                            mask = self.mask_to_numpy(segment, filename=output_filename, anns_obj_id=obj_idx)
-
-                # self.del_inference_state_image()
-                # input(f"Complete: {self.frame_names[ann_frame_idx]}  Next >>>")
-                ann_obj_id = out_obj_ids[-1]
-                past_ann_obj_id = out_obj_ids[-1]
+            # self.del_inference_state_image()
+            # input(f"Complete: {self.frame_names[ann_frame_idx]}  Next >>>")
+            # ann_obj_id = out_obj_ids[-1]
+            # past_ann_obj_id = out_obj_ids[-1]
 
     def _setup_gui(self) -> None:
         """Setup the Dear PyGUI layout."""

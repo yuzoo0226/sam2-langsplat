@@ -3,6 +3,76 @@ import torch
 import numpy as np
 
 
+def make_anns_image(anns, borders=True, specific_id=None):
+    np.random.random(3)
+    if len(anns) == 0:
+        return
+    sorted_anns = sorted(anns, key=(lambda x: x['area']), reverse=True)
+    img = np.ones((sorted_anns[0]['segmentation'].shape[0], sorted_anns[0]['segmentation'].shape[1], 4))
+    img[:, :, 3] = 0
+    for idx, ann in enumerate(sorted_anns):
+        if specific_id is not None:
+            if idx != specific_id:
+                continue
+
+        m = ann['segmentation']
+        color_mask = np.concatenate([np.random.random(3), [0.5]])
+        img[m] = color_mask
+        if borders:
+            contours, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE) 
+            # Try to smooth contours
+            contours = [cv2.approxPolyDP(contour, epsilon=0.01, closed=True) for contour in contours]
+            cv2.drawContours(img, contours, -1, (0, 0, 1, 0.4), thickness=1)
+
+    return img
+
+
+def apply_mask_to_image(image, mask):
+    """
+    画像のmaskのTrueの部分のみを残し、それ以外を黒で塗りつぶす。
+
+    Args:
+        image (numpy.ndarray): 入力画像 (H, W, C) (BGR形式)
+        mask (numpy.ndarray): マスク画像 (H, W) (True/False の2値)
+
+    Returns:
+        numpy.ndarray: マスクを適用した画像
+    """
+    # マスクを 0/1 の uint8 型に変換
+    mask_uint8 = mask.astype(np.uint8) * 255
+
+    # 3チャンネルのマスクを作成
+    mask_3ch = cv2.merge([mask_uint8] * 3)
+
+    # 画像とマスクを適用（False の部分を黒に）
+    masked_image = cv2.bitwise_and(image, mask_3ch)
+
+    return masked_image
+
+
+def apply_mask_to_rgba_image(image, mask):
+    """
+    RGBA画像のmaskのTrueの部分のみを残し、それ以外を完全に黒 (透明) にする。
+
+    Args:
+        image (numpy.ndarray): 入力画像 (H, W, 4) (RGBA形式)
+        mask (numpy.ndarray): マスク画像 (1, 1, H, W) の形状を持つ4次元の真偽値配列
+
+    Returns:
+        numpy.ndarray: マスクを適用したRGBA画像 (H, W, 4)
+    """
+    # マスクを2次元に変換 (H, W)
+    mask_2d = mask.squeeze()  # (728, 986) の形に変換
+
+    # 出力用の画像を作成（初期値は黒のRGBA）
+    masked_image = np.zeros_like(image, dtype=np.uint8)
+
+    # マスクが True の領域のみ元の画像を適用
+    masked_image[mask_2d] = image[mask_2d]
+
+    return masked_image
+
+
 def calculate_iou(mask1, mask2):
     """2つのバイナリマスクのIoUを計算"""
     intersection = torch.logical_and(mask1, mask2).sum().item()
