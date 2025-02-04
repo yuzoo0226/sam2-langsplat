@@ -39,6 +39,7 @@ def apply_mask_to_image(image, mask):
         numpy.ndarray: マスクを適用した画像
     """
     # マスクを 0/1 の uint8 型に変換
+    # mask = mask.squeeze()
     mask_uint8 = mask.astype(np.uint8) * 255
 
     # 3チャンネルのマスクを作成
@@ -180,3 +181,12 @@ def get_centroids(contours, min_area=50):
             centroids.append((cx, cy))
 
     return centroids
+
+
+def combined_all_mask(video_segment_frame):
+    target_mask = video_segment_frame[1].squeeze()
+    for key, mask in video_segment_frame.items():
+        # すべてのマスクを統合（どれか1つでも True なら True）
+        target_mask = np.logical_or.reduce([target_mask, mask.squeeze()])
+
+    return target_mask

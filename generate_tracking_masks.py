@@ -18,7 +18,7 @@ import torch
 from sam2.build_sam import build_sam2_video_predictor, build_sam2
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 from utils.grid_generator import generate_uniform_grid, draw_points_on_image, auto_grid_generator
-from utils.mask_utils import make_anns_image, apply_mask_to_rgba_image, apply_mask_to_image, calculate_iou, filter_overlapping_masks, create_combined_mask, find_enclosed_regions, get_centroids
+from utils.mask_utils import make_anns_image, apply_mask_to_rgba_image, apply_mask_to_image, calculate_iou, filter_overlapping_masks, create_combined_mask, find_enclosed_regions, get_centroids, combined_all_mask
 
 
 class TrackingViewer:
@@ -41,7 +41,10 @@ class TrackingViewer:
         self.sub_image_height = h // self.show_subimage_scale
 
         self.num_images = len(self.images)
-        self.idx = 0
+        self.mask_indices = [1]
+        self.target_frame_idx: int = 0
+        self.target_mask_idx: int = -1
+        self.ann_obj_id: int = 0
 
         # self.predictor_video = SamPredictor(model)
 
@@ -136,6 +139,26 @@ class TrackingViewer:
             print(output_path)
             cv2.imwrite(output_path, frame)
 
+    def set_before1_image(self, image):
+        image = cv2.resize(image, (int(self.main_image_width * (1/self.show_subimage_scale)), int(self.main_image_height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
+        dpg.set_value(self.before1_image_texture, image)
+        dpg.configure_item(self.before1_image_texture)
+
+    def set_before2_image(self, image):
+        image = cv2.resize(image, (int(self.main_image_width * (1/self.show_subimage_scale)), int(self.main_image_height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
+        dpg.set_value(self.before2_image_texture, image)
+        dpg.configure_item(self.before2_image_texture)
+
+    def set_next1_image(self, image):
+        image = cv2.resize(image, (int(self.main_image_width * (1/self.show_subimage_scale)), int(self.main_image_height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
+        dpg.set_value(self.next1_image_texture, image)
+        dpg.configure_item(self.next1_image_texture)
+
+    def set_next2_image(self, image):
+        image = cv2.resize(image, (int(self.main_image_width * (1/self.show_subimage_scale)), int(self.main_image_height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
+        dpg.set_value(self.next2_image_texture, image)
+        dpg.configure_item(self.next2_image_texture)
+
     def set_main_image(self, image):
         dpg.set_value(self.select_image_texture, image)
         dpg.configure_item(self.select_image_texture)
@@ -161,28 +184,47 @@ class TrackingViewer:
     def update_images(self, sender: int, app_data: int) -> None:
         """Update displayed images based on slider value."""
         idx = int(app_data)
-        self.idx = idx
-        if idx in self.images:
-            width, height, channels, image_data = self._load_texture(self.images[idx])
-            dpg.set_value(self.select_image_texture, image_data)
-            dpg.configure_item(self.select_image_texture)
+        self.target_frame_idx = idx
+        if self.target_mask_idx == -1:
+            if idx in self.images:
+                width, height, channels, image_data = self._load_texture(self.images[idx])
+                dpg.set_value(self.select_image_texture, image_data)
+                dpg.configure_item(self.select_image_texture)
 
-        if idx - 1 in self.images:
-            width, height, channels, image_data = self._load_texture(self.images[idx - 1])
+            if idx - 2 in self.images:
+                width, height, channels, image_data = self._load_texture(self.images[idx - 2])
+                resized_image = cv2.resize(image_data, (int(width * (1/self.show_subimage_scale)), int(height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
+                dpg.set_value(self.before2_image_texture, resized_image)
+                dpg.configure_item(self.before2_image_texture)
+            else:
+                dpg.set_value(self.before2_image_texture, self.blank_sub_image)
 
-            resized_image = cv2.resize(image_data, (int(width * (1/self.show_subimage_scale)), int(height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
-            dpg.set_value(self.before_image_texture, resized_image)
-            dpg.configure_item(self.before_image_texture)
+            if idx - 1 in self.images:
+                width, height, channels, image_data = self._load_texture(self.images[idx - 1])
+                resized_image = cv2.resize(image_data, (int(width * (1/self.show_subimage_scale)), int(height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
+                dpg.set_value(self.before1_image_texture, resized_image)
+                dpg.configure_item(self.before1_image_texture)
+            else:
+                dpg.set_value(self.before1_image_texture, self.blank_sub_image)
+
+            if idx + 1 in self.images:
+                width, height, channels, image_data = self._load_texture(self.images[idx + 1])
+                resized_image = cv2.resize(image_data, (int(width * (1/self.show_subimage_scale)), int(height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
+                dpg.set_value(self.next1_image_texture, resized_image)
+                dpg.configure_item(self.next1_image_texture, width=width//2, height=height//2)
+            else:
+                dpg.set_value(self.next1_image_texture, self.blank_sub_image)
+
+            if idx + 2 in self.images:
+                width, height, channels, image_data = self._load_texture(self.images[idx + 2])
+                resized_image = cv2.resize(image_data, (int(width * (1/self.show_subimage_scale)), int(height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
+                dpg.set_value(self.next2_image_texture, resized_image)
+                dpg.configure_item(self.next2_image_texture, width=width//2, height=height//2)
+            else:
+                dpg.set_value(self.next2_image_texture, self.blank_sub_image)
+
         else:
-            dpg.set_value(self.before_image_texture, self.blank_sub_image)
-
-        if idx + 1 in self.images:
-            width, height, channels, image_data = self._load_texture(self.images[idx + 1])
-            resized_image = cv2.resize(image_data, (int(width * (1/self.show_subimage_scale)), int(height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
-            dpg.set_value(self.next_image_texture, resized_image)
-            dpg.configure_item(self.next_image_texture, width=width//2, height=height//2)
-        else:
-            dpg.set_value(self.next_image_texture, self.blank_sub_image)
+            self.mask_select_callback("", str(self.target_mask_idx))
 
     def mask_to_numpy(self, mask, image, obj_id=None, random_color=False, visualize=False, filename=None, anns_obj_id=None, borders=True, use_rgb=False):
         if use_rgb:
@@ -210,7 +252,7 @@ class TrackingViewer:
             mask_image = mask.reshape(h, w, 1) * color[0]
 
         if borders:
-            contours, _ = cv2.findContours(mask_image.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE) 
+            contours, _ = cv2.findContours(mask_image.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
             # Try to smooth contours
             contours = [cv2.approxPolyDP(contour, epsilon=0.01, closed=True) for contour in contours]
             cv2.drawContours(mask_image, contours, -1, (0, 0, 1, 0.4), thickness=1)
@@ -222,8 +264,8 @@ class TrackingViewer:
             ic(os.path.join(self.image_dir, filename).replace(".", f"_{str(anns_obj_id).zfill(5)}."))
             cv2.imwrite(os.path.join(self.image_dir, filename).replace("renamed_images", "renamed_images_anns").replace(".", f"_{str(anns_obj_id).zfill(5)}."), mask_image*255)
 
-        if self.is_viewer:
-            self.set_main_image(mask_image)
+        # if self.is_viewer:
+        #     self.set_main_image(mask_image)
         return mask_image
 
     @staticmethod
@@ -246,7 +288,7 @@ class TrackingViewer:
             self.predictor_image,
             # min_mask_region_area=100,
             pred_iou_thresh=0.9,
-            points_per_side=30,
+            points_per_side=32,
             crop_n_points_downscale_factor=0.9,
             stability_score_thresh=0.95,
             box_nms_thresh=0.7,
@@ -257,17 +299,6 @@ class TrackingViewer:
         _, removed_indices = filter_overlapping_masks(segmentation_array, keys)
         ic(removed_indices)
 
-        # for idx, mask in enumerate(segmentation_array):
-        #     ic(idx, mask)
-        #     # anns_image = make_anns_image(anns, borders=False, specific_id=idx)
-        #     # self.set_main_image(anns_image)
-        #     anns_image = apply_mask_to_image(image, mask)
-        #     # self.set_main_image(anns_image)
-        #     cv2.imwrite("temp.png", anns_image)
-        #     # cv2.waitKey(0)
-        #     input("netx>>")
-
-        # labels = np.array([1], np.int32)
         for idx in removed_indices:
             np.delete(segmentation_array, idx)
 
@@ -283,27 +314,15 @@ class TrackingViewer:
                 mask=mask
             )
 
-        # for idx, point in enumerate(points):
-        #     _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_points_or_box(
-        #         inference_state=self.inference_state,
-        #         frame_idx=ann_frame_idx,
-        #         obj_id=ann_obj_id+idx,
-        #         points=[point],
-        #         labels=labels,
-        #     )
-
         if image is not None:
             for mask in out_mask_logits:
                 image = draw_points_on_image(image, points=points)
                 mask = (mask > 0.0).cpu().numpy()
-                ic(mask)
                 display_image = apply_mask_to_rgba_image(image, mask)
+                display_image = cv2.cvtColor(display_image, cv2.COLOR_BGRA2RGBA)
                 self.set_main_image(display_image/255)
                 if self.debug:
                     time.sleep(0.2)
-
-        # print(out_mask_logits)
-        # mask_image = self.mask_to_numpy((out_mask_logits[0] > 0.0).cpu().numpy())
 
         return out_obj_ids, out_mask_logits
 
@@ -334,6 +353,139 @@ class TrackingViewer:
         self.inference_state["num_frames"] -= 1
         # self.frame_names = self.frame_names[1:]
 
+    def reset_mask_callback(self, sender: str, app_data: str) -> None:
+        """reset target mask idx and show unmasked image
+
+        Args:
+            sender (str): The ID of the widget that triggered this callback.
+            app_data (str): Additional data from the widget.
+        """
+        self.target_mask_idx = -1
+        self.update_images("", str(self.target_frame_idx))
+
+    def mask_select_callback(self, sender: str, app_data: str) -> None:
+        """mask selection
+
+        Args:
+            sender (str): The ID of the widget that triggered this callback.
+            app_data (str): Additional data from the widget.
+        """
+        ic(f"Selected Item: {app_data}")
+        self.target_mask_idx: int = int(app_data)
+
+        target_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx]))
+        if self.target_mask_idx > 0:
+            target_mask = self.video_segments[self.target_frame_idx][self.target_mask_idx].squeeze()
+
+            try:
+                before1_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx-1]))
+                before1_mask = self.video_segments[self.target_frame_idx-1][self.target_mask_idx].squeeze()
+                before1_masked_image = apply_mask_to_image(before1_image, before1_mask)
+                before1_masked_image = cv2.cvtColor(before1_masked_image, cv2.COLOR_BGR2RGBA)
+                self.set_before1_image(before1_masked_image/255)
+            except Exception as e:
+                self.set_before1_image(self.blank_sub_image)
+
+            try:
+                before2_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx-2]))
+                before2_mask = self.video_segments[self.target_frame_idx-2][self.target_mask_idx].squeeze()
+                before2_masked_image = apply_mask_to_image(before2_image, before2_mask)
+                before2_masked_image = cv2.cvtColor(before2_masked_image, cv2.COLOR_BGR2RGBA)
+                self.set_before2_image(before2_masked_image/255)
+            except Exception as e:
+                self.set_before2_image(self.blank_sub_image)
+
+            try:
+                next1_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx+1]))
+                next1_mask = self.video_segments[self.target_frame_idx+1][self.target_mask_idx].squeeze()
+                next1_masked_image = apply_mask_to_image(next1_image, next1_mask)
+                next1_masked_image = cv2.cvtColor(next1_masked_image, cv2.COLOR_BGR2RGBA)
+                self.set_next1_image(next1_masked_image/255)
+            except Exception as e:
+                self.set_next1_image(self.blank_sub_image)
+
+            try:
+                next2_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx+2]))
+                next2_mask = self.video_segments[self.target_frame_idx+2][self.target_mask_idx].squeeze()
+                next2_masked_image = apply_mask_to_image(next2_image, next2_mask)
+                next2_masked_image = cv2.cvtColor(next2_masked_image, cv2.COLOR_BGR2RGBA)
+                self.set_next2_image(next2_masked_image/255)
+            except Exception as e:
+                self.set_next2_image(self.blank_sub_image)
+
+        else:
+            target_mask = combined_all_mask(self.video_segments[self.target_frame_idx])
+
+            try:
+                before1_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx-1]))
+                before1_mask = combined_all_mask(self.video_segments[self.target_frame_idx-1])
+                before1_masked_image = apply_mask_to_image(before1_image, before1_mask)
+                before1_masked_image = cv2.cvtColor(before1_masked_image, cv2.COLOR_BGR2RGBA)
+                self.set_before1_image(before1_masked_image/255)
+            except Exception as e:
+                self.set_before1_image(self.blank_sub_image)
+
+            try:
+                before2_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx-2]))
+                before2_mask = combined_all_mask(self.video_segments[self.target_frame_idx-2])
+                before2_masked_image = apply_mask_to_image(before2_image, before2_mask)
+                before2_masked_image = cv2.cvtColor(before2_masked_image, cv2.COLOR_BGR2RGBA)
+                self.set_before2_image(before2_masked_image/255)
+            except Exception as e:
+                self.set_before2_image(self.blank_sub_image)
+
+            try:
+                next1_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx+1]))
+                next1_mask = combined_all_mask(self.video_segments[self.target_frame_idx+1])
+                next1_masked_image = apply_mask_to_image(next1_image, next1_mask)
+                next1_masked_image = cv2.cvtColor(next1_masked_image, cv2.COLOR_BGR2RGBA)
+                self.set_next1_image(next1_masked_image/255)
+            except Exception as e:
+                self.set_next1_image(self.blank_sub_image)
+
+            try:
+                next2_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx+2]))
+                next2_mask = combined_all_mask(self.video_segments[self.target_frame_idx+2])
+                next2_masked_image = apply_mask_to_image(next2_image, next2_mask)
+                next2_masked_image = cv2.cvtColor(next2_masked_image, cv2.COLOR_BGR2RGBA)
+                self.set_next2_image(next2_masked_image/255)
+            except Exception as e:
+                self.set_next2_image(self.blank_sub_image)
+
+        masked_image = apply_mask_to_image(target_image, target_mask)
+        masked_image = cv2.cvtColor(masked_image, cv2.COLOR_BGR2RGBA)
+        self.set_main_image(masked_image/255)
+
+    def add_mask_to_blank_area(self, sender: str, app_data: str) -> None:
+        """_summary_
+
+        Args:
+            sender (str): The ID of the widget that triggered this callback.
+            app_data (str): Additional data from the widget.
+        """
+        target_mask = combined_all_mask(self.video_segments[self.target_frame_idx])
+        target_mask = (~target_mask).astype(np.uint8) * 255
+        # target_mask = cv2.cvtColor(target_mask, cv2.COLOR_BGR2GRAY)
+        contours, hierarchy = cv2.findContours(target_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        ic(contours)
+        min_area = 500
+
+        # 3チャンネル画像に変換（白黒 → BGR）
+        color_mask = cv2.cvtColor(target_mask, cv2.COLOR_GRAY2BGR)
+
+        # 面積が一定以上の領域のみ描画
+        for idx, contour in enumerate(contours):
+            area = cv2.contourArea(contour)
+            ic(idx, area)
+            if area >= min_area:
+                # 領域内を緑色で塗りつぶす（(0, 255, 0) は BGR の緑）
+                cv2.drawContours(color_mask, [contour], -1, (0, 255, 0), thickness=cv2.FILLED)
+                # 輪郭を赤色で描画（(0, 0, 255) は BGR の赤）
+                cv2.drawContours(color_mask, [contour], -1, (0, 0, 255), thickness=2)
+
+        visualized_image = cv2.cvtColor(color_mask, cv2.COLOR_BGR2RGBA)
+        self.set_main_image(visualized_image/255)
+
     def segment_video_callback(self, sender: str, app_data: str) -> None:
         """Segment for Selected video
 
@@ -348,26 +500,23 @@ class TrackingViewer:
                 if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG"]
             ]
             self.frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
-            # frame_names_copy = copy.deepcopy(self.frame_names)
             image = cv2.imread(os.path.join(self.image_dir, self.frame_names[0]))
             h, w, ch = image.shape
 
-            ann_obj_id = 0
-            past_ann_obj_id = 0
             ann_frame_idx = 0
-            video_segments = {}  # video_segments contains the per-frame segmentation results
+            self.video_segments = {}  # video_segments contains the per-frame segmentation results
             labels = np.array([1], np.int32)
 
-            out_obj_ids, out_mask_logits = self.mask_point_generation(ann_frame_idx, ann_obj_id, height=h, width=w, num_points=16*16, image=image)
-            ann_obj_id = out_obj_ids[-1]
+            out_obj_ids, out_mask_logits = self.mask_point_generation(ann_frame_idx, self.ann_obj_id, height=h, width=w, num_points=16*16, image=image)
+            self.ann_obj_id = out_obj_ids[-1]
 
             for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state):
-                video_segments[out_frame_idx] = {
+                self.video_segments[out_frame_idx] = {
                     out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy() for i, out_obj_id in enumerate(out_obj_ids)
                 }
 
                 # else:
-                #     combined_mask = create_combined_mask(video_segments[ann_frame_idx])
+                #     combined_mask = create_combined_mask(self.video_segments[ann_frame_idx])
                 #     enclosed_contours = find_enclosed_regions(combined_mask)
                 #     points = get_centroids(enclosed_contours)
                 #     ic(points)
@@ -383,24 +532,24 @@ class TrackingViewer:
                 #         )
                 #     ic(out_obj_ids)
 
-            # Tracking
-            for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state):
-                # if out_frame_idx >= ann_frame_idx:  # 以前までに検出した画像からの削除は行わない．
-                for i, out_obj_id in enumerate(out_obj_ids):
-                    # if out_obj_id > past_ann_obj_id:
-                    video_segments[out_frame_idx][out_obj_id] = (out_mask_logits[i] > 0.0).cpu().numpy()
+            # # Tracking
+            # for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state):
+            #     # if out_frame_idx >= ann_frame_idx:  # 以前までに検出した画像からの削除は行わない．
+            #     for i, out_obj_id in enumerate(out_obj_ids):
+            #         # if out_obj_id > past_ann_obj_id:
+            #         self.video_segments[out_frame_idx][out_obj_id] = (out_mask_logits[i] > 0.0).cpu().numpy()
 
-            for out_frame_idx, (_, segments) in enumerate(video_segments.items()):
+            for out_frame_idx, (_, segments) in enumerate(self.video_segments.items()):
                 # if out_frame_idx == len(self.frame_names)-1:
                 output_filename = self.frame_names[out_frame_idx]
                 image = cv2.imread(os.path.join(self.image_dir, self.frame_names[out_frame_idx]))
                 for obj_idx, segment in segments.items():
                     mask = self.mask_to_numpy(segment, image, filename=output_filename, anns_obj_id=obj_idx)
 
-            # self.del_inference_state_image()
-            # input(f"Complete: {self.frame_names[ann_frame_idx]}  Next >>>")
-            # ann_obj_id = out_obj_ids[-1]
-            # past_ann_obj_id = out_obj_ids[-1]
+            ic(out_obj_ids)
+            ic(type(out_obj_ids))
+            self.mask_indices = [0] + out_obj_ids
+            dpg.configure_item("mask_select", items=self.mask_indices)
 
     def _setup_gui(self) -> None:
         """Setup the Dear PyGUI layout."""
@@ -413,23 +562,33 @@ class TrackingViewer:
         with dpg.texture_registry():
             # self.temp = dpg.add_dynamic_texture(width=self.image_show_size, height=self.image_show_size, default_value=blank_image, tag="image_texture")
             self.select_image_texture = dpg.add_dynamic_texture(width=self.main_image_width, height=self.main_image_height, default_value=self.blank_main_image, tag="selected_image_texture")
-            self.before_image_texture = dpg.add_dynamic_texture(width=self.sub_image_width, height=self.sub_image_height, default_value=self.blank_sub_image, tag="before_image_texture")
-            self.next_image_texture = dpg.add_dynamic_texture(width=self.sub_image_width, height=self.sub_image_height, default_value=self.blank_sub_image,  tag="next_image_texture")
+            self.before1_image_texture = dpg.add_dynamic_texture(width=self.sub_image_width, height=self.sub_image_height, default_value=self.blank_sub_image, tag="before1_image_texture")
+            self.before2_image_texture = dpg.add_dynamic_texture(width=self.sub_image_width, height=self.sub_image_height, default_value=self.blank_sub_image, tag="before2_image_texture")
+            self.next1_image_texture = dpg.add_dynamic_texture(width=self.sub_image_width, height=self.sub_image_height, default_value=self.blank_sub_image,  tag="next1_image_texture")
+            self.next2_image_texture = dpg.add_dynamic_texture(width=self.sub_image_width, height=self.sub_image_height, default_value=self.blank_sub_image,  tag="next2_image_texture")
 
         with dpg.window(label="Image Processing GUI"):
             # self.text_current_frame_widget_id = dpg.add_text("frame_name", tag="frame_name")
             with dpg.group(horizontal=True):
                 with dpg.group(horizontal=False):
-                    dpg.add_image("before_image_texture", label="before image", tag="before_image_widget")
-                    dpg.add_image("next_image_texture", label="next image", tag="next_image_widget")
+                    dpg.add_image("before1_image_texture", label="before1 image", tag="before1_image_widget")
+                    dpg.add_image("before2_image_texture", label="before2 image", tag="before2_image_widget")
+                    dpg.add_image("next1_image_texture", label="next1 image", tag="next1_image_widget")
+                    dpg.add_image("next2_image_texture", label="next2 image", tag="next2_image_widget")
                 dpg.add_image("selected_image_texture", label="selected image", tag="select_image_widget")
 
             dpg.add_slider_int(label="Image ID", min_value=0, max_value=self.num_images-1, default_value=0, callback=self.update_images)
             dpg.add_input_text(label="Video path", default_value="/mnt/home/yuga-y/usr/splat_ws/third_party/SegAnyGAussians/models/vae_v6.pt", tag="checkpoint_path")
 
-            dpg.add_button(label="Create Video", callback=self.create_video_callback)
             dpg.add_button(label="Segment Video", callback=self.segment_video_callback)
-            dpg.add_button(label="Renane folder", callback=self.rename_folder_callback)
+            # dpg.add_button(label="Create Video", callback=self.create_video_callback)
+            # dpg.add_button(label="Renane folder", callback=self.rename_folder_callback)
+
+            with dpg.group(horizontal=True):
+                dpg.add_combo(label="Choose an mask", items=self.mask_indices, callback=self.mask_select_callback, tag="mask_select")
+                dpg.add_button(label="Reset Mask", callback=self.reset_mask_callback)
+
+            dpg.add_button(label="Add mask to target frame", callback=self.add_mask_to_blank_area)
 
             # with dpg.handler_registry():
             #     dpg.add_mouse_move_handler(callback=self.mouse_move_callback)
@@ -447,6 +606,7 @@ class TrackingViewer:
         dpg.setup_dearpygui()
         dpg.show_viewport()
         dpg.start_dearpygui()
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Tracking Anything GUI")
