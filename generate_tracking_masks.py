@@ -18,7 +18,7 @@ import torch
 from sam2.build_sam import build_sam2_video_predictor, build_sam2
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 from utils.grid_generator import generate_uniform_grid, draw_points_on_image, auto_grid_generator
-from utils.mask_utils import make_anns_image, apply_mask_to_rgba_image, apply_mask_to_image, calculate_iou, filter_overlapping_masks, create_combined_mask, find_enclosed_regions, get_centroids, combined_all_mask
+from utils.mask_utils import make_anns_image, apply_mask_to_rgba_image, apply_mask_to_image, calculate_iou, filter_overlapping_masks, create_combined_mask, find_enclosed_regions, get_centroids, combined_all_mask, has_same_mask
 
 
 class TrackingViewer:
@@ -45,18 +45,21 @@ class TrackingViewer:
         self.target_frame_idx: int = 0
         self.target_mask_idx: int = -1
         self.ann_obj_id: int = 0
-
-        # self.predictor_video = SamPredictor(model)
-
-        # sam = sam_model_registry["vit-h"](checkpoint="<path/to/checkpoint>")
-        # predictor = SamPredictor(sam)
-        # predictor.set_image(<your_image>)
-        # masks, _, _ = predictor.predict(<input_prompts>)
+        self.ann_frame_idx = 0
+        self.video_segments = {}  # video_segments contains the per-frame segmentation results
 
         self.checkpoint = "./checkpoints/sam2.1_hiera_large.pt"
         self.model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
         self.predictor_video = build_sam2_video_predictor(self.model_cfg, self.checkpoint)
         self.predictor_image = build_sam2(self.model_cfg, self.checkpoint)
+
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+            self.inference_state = self.predictor_video.init_state(self.image_dir)
+            self.frame_names = [
+                p for p in os.listdir(self.image_dir)
+                if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG"]
+            ]
+            self.frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
 
         self.is_viewer = is_viewer
         self.debug = is_debug
@@ -185,6 +188,8 @@ class TrackingViewer:
         """Update displayed images based on slider value."""
         idx = int(app_data)
         self.target_frame_idx = idx
+        self.ann_frame_idx = idx
+
         if self.target_mask_idx == -1:
             if idx in self.images:
                 width, height, channels, image_data = self._load_texture(self.images[idx])
@@ -261,7 +266,7 @@ class TrackingViewer:
             cv2.imshow("mask image", mask_image)
             cv2.waitKey(0)
         if filename is not None:
-            ic(os.path.join(self.image_dir, filename).replace(".", f"_{str(anns_obj_id).zfill(5)}."))
+            # ic(os.path.join(self.image_dir, filename).replace(".", f"_{str(anns_obj_id).zfill(5)}."))
             cv2.imwrite(os.path.join(self.image_dir, filename).replace("renamed_images", "renamed_images_anns").replace(".", f"_{str(anns_obj_id).zfill(5)}."), mask_image*255)
 
         # if self.is_viewer:
@@ -296,30 +301,36 @@ class TrackingViewer:
         )
 
         keys = [i for i in range(len(points))]
-        _, removed_indices = filter_overlapping_masks(segmentation_array, keys)
-        ic(removed_indices)
+        _, removed_indices = filter_overlapping_masks(segmentation_array, keys, del_method="smaller")
 
         for idx in removed_indices:
             np.delete(segmentation_array, idx)
 
+        if self.video_segments != {}:
+            masks = self.video_segments[self.ann_frame_idx].values()
+            for idx, target_mask in enumerate(segmentation_array):
+                if has_same_mask(target_mask, masks):
+                    removed_indices.append(idx)
+
+        append_obj_id = 1
         for idx, mask in enumerate(segmentation_array):
-            # ic(mask)
             if idx in removed_indices:
                 continue
 
             _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_mask(
                 inference_state=self.inference_state,
                 frame_idx=ann_frame_idx,
-                obj_id=ann_obj_id+idx,
+                obj_id=ann_obj_id+append_obj_id,
                 mask=mask
             )
+            append_obj_id += 1
 
         if image is not None:
             for mask in out_mask_logits:
                 image = draw_points_on_image(image, points=points)
                 mask = (mask > 0.0).cpu().numpy()
                 display_image = apply_mask_to_rgba_image(image, mask)
-                display_image = cv2.cvtColor(display_image, cv2.COLOR_BGRA2RGBA)
+                # display_image = cv2.cvtColor(display_image, cv2.COLOR_BGRA2RGBA)
                 self.set_main_image(display_image/255)
                 if self.debug:
                     time.sleep(0.2)
@@ -336,12 +347,12 @@ class TrackingViewer:
         for ann in sorted_anns:
             m = ann['segmentation']
             color_mask = np.concatenate([np.random.random(3), [0.5]])
-            img[m] = color_mask 
+            img[m] = color_mask
             if borders:
                 contours, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE) 
                 # Try to smooth contours
                 contours = [cv2.approxPolyDP(contour, epsilon=0.01, closed=True) for contour in contours]
-                cv2.drawContours(img, contours, -1, (0, 0, 1, 0.4), thickness=1) 
+                cv2.drawContours(img, contours, -1, (0, 0, 1, 0.4), thickness=1)
 
         cv2.imwrite("anns.jpg", img*255)
 
@@ -465,23 +476,17 @@ class TrackingViewer:
         """
         target_mask = combined_all_mask(self.video_segments[self.target_frame_idx])
         target_mask = (~target_mask).astype(np.uint8) * 255
-        # target_mask = cv2.cvtColor(target_mask, cv2.COLOR_BGR2GRAY)
         contours, hierarchy = cv2.findContours(target_mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-        ic(contours)
         min_area = 500
 
-        # 3チャンネル画像に変換（白黒 → BGR）
         color_mask = cv2.cvtColor(target_mask, cv2.COLOR_GRAY2BGR)
 
-        # 面積が一定以上の領域のみ描画
         for idx, contour in enumerate(contours):
             area = cv2.contourArea(contour)
             ic(idx, area)
             if area >= min_area:
-                # 領域内を緑色で塗りつぶす（(0, 255, 0) は BGR の緑）
-                cv2.drawContours(color_mask, [contour], -1, (0, 255, 0), thickness=cv2.FILLED)
-                # 輪郭を赤色で描画（(0, 0, 255) は BGR の赤）
-                cv2.drawContours(color_mask, [contour], -1, (0, 0, 255), thickness=2)
+                cv2.drawContours(color_mask, [contour], -1, (0, 255, 0), thickness=cv2.FILLED)  # area
+                cv2.drawContours(color_mask, [contour], -1, (0, 0, 255), thickness=2)  # border
 
         visualized_image = cv2.cvtColor(color_mask, cv2.COLOR_BGR2RGBA)
         self.set_main_image(visualized_image/255)
@@ -494,20 +499,16 @@ class TrackingViewer:
             app_data (str): Additional data from the widget.
         """
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
-            self.inference_state = self.predictor_video.init_state(self.image_dir)
-            self.frame_names = [
-                p for p in os.listdir(self.image_dir)
-                if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG"]
-            ]
-            self.frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
-            image = cv2.imread(os.path.join(self.image_dir, self.frame_names[0]))
+            # self.inference_state = self.predictor_video.init_state(self.image_dir)
+            # self.frame_names = [
+            #     p for p in os.listdir(self.image_dir)
+            #     if os.path.splitext(p)[-1] in [".jpg", ".jpeg", ".JPG", ".JPEG"]
+            # ]
+            # self.frame_names.sort(key=lambda p: int(os.path.splitext(p)[0]))
+            image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.ann_frame_idx]))
             h, w, ch = image.shape
 
-            ann_frame_idx = 0
-            self.video_segments = {}  # video_segments contains the per-frame segmentation results
-            labels = np.array([1], np.int32)
-
-            out_obj_ids, out_mask_logits = self.mask_point_generation(ann_frame_idx, self.ann_obj_id, height=h, width=w, num_points=16*16, image=image)
+            out_obj_ids, out_mask_logits = self.mask_point_generation(self.ann_frame_idx, self.ann_obj_id, height=h, width=w, num_points=16*16, image=image)
             self.ann_obj_id = out_obj_ids[-1]
 
             for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state):
@@ -515,41 +516,21 @@ class TrackingViewer:
                     out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy() for i, out_obj_id in enumerate(out_obj_ids)
                 }
 
-                # else:
-                #     combined_mask = create_combined_mask(self.video_segments[ann_frame_idx])
-                #     enclosed_contours = find_enclosed_regions(combined_mask)
-                #     points = get_centroids(enclosed_contours)
-                #     ic(points)
-
-                #     for idx, point in enumerate(points):
-                #         ann_obj_id = ann_obj_id + idx
-                #         _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_points_or_box(
-                #             inference_state=self.inference_state,
-                #             frame_idx=ann_frame_idx,
-                #             obj_id=ann_obj_id,
-                #             points=[point],
-                #             labels=labels,
-                #         )
-                #     ic(out_obj_ids)
-
-            # # Tracking
-            # for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state):
-            #     # if out_frame_idx >= ann_frame_idx:  # 以前までに検出した画像からの削除は行わない．
-            #     for i, out_obj_id in enumerate(out_obj_ids):
-            #         # if out_obj_id > past_ann_obj_id:
-            #         self.video_segments[out_frame_idx][out_obj_id] = (out_mask_logits[i] > 0.0).cpu().numpy()
-
             for out_frame_idx, (_, segments) in enumerate(self.video_segments.items()):
                 # if out_frame_idx == len(self.frame_names)-1:
                 output_filename = self.frame_names[out_frame_idx]
                 image = cv2.imread(os.path.join(self.image_dir, self.frame_names[out_frame_idx]))
                 for obj_idx, segment in segments.items():
-                    mask = self.mask_to_numpy(segment, image, filename=output_filename, anns_obj_id=obj_idx)
+                    _ = self.mask_to_numpy(segment, image, filename=output_filename, anns_obj_id=obj_idx)
 
             ic(out_obj_ids)
             ic(type(out_obj_ids))
             self.mask_indices = [0] + out_obj_ids
             dpg.configure_item("mask_select", items=self.mask_indices)
+
+            self.target_mask_idx = 0
+            self.mask_select_callback("segment_video_callback", self.target_mask_idx)
+            # self.update_images("segment_video_callback", self.ann_frame_idx)
 
     def _setup_gui(self) -> None:
         """Setup the Dear PyGUI layout."""
@@ -571,8 +552,8 @@ class TrackingViewer:
             # self.text_current_frame_widget_id = dpg.add_text("frame_name", tag="frame_name")
             with dpg.group(horizontal=True):
                 with dpg.group(horizontal=False):
-                    dpg.add_image("before1_image_texture", label="before1 image", tag="before1_image_widget")
                     dpg.add_image("before2_image_texture", label="before2 image", tag="before2_image_widget")
+                    dpg.add_image("before1_image_texture", label="before1 image", tag="before1_image_widget")
                     dpg.add_image("next1_image_texture", label="next1 image", tag="next1_image_widget")
                     dpg.add_image("next2_image_texture", label="next2 image", tag="next2_image_widget")
                 dpg.add_image("selected_image_texture", label="selected image", tag="select_image_widget")
@@ -594,7 +575,6 @@ class TrackingViewer:
             #     dpg.add_mouse_move_handler(callback=self.mouse_move_callback)
             #     dpg.add_mouse_click_handler(callback=self.click_callback)
             #     dpg.add_mouse_release_handler(callback=self.release_callback)
-
 
         # dpg.create_viewport(title='Image Viewer', width=800, height=600)
         # with dpg.window(label="Main Window", width=800, height=600):

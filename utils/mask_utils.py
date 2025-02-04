@@ -125,6 +125,16 @@ def filter_overlapping_masks(masks, keys, iou_threshold=0.8, del_method="smaller
     return filtered_masks, removed_indices
 
 
+def has_same_mask(target_mask: np.array, masks: np.array, th: float = 0.5) -> bool:
+    for mask in masks:
+        iou = calculate_iou(torch.from_numpy(target_mask), torch.from_numpy(mask).squeeze())
+        # 重なりの大きいマスクが見つかった場合にTrue
+        if iou > th:
+            return True
+
+    return False
+
+
 def create_combined_mask(video_segments):
     """
     複数のマスクを OR 演算で統合し、全体のマスクを作成する
