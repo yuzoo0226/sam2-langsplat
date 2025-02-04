@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from sam2.modeling.sam2_base import SAM2Base
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
+from segment_anything_langsplat import SamAutomaticMaskGenerator
 
 
 def generate_uniform_grid(height, width, num_points, padding=20):
@@ -26,11 +27,11 @@ def draw_points_on_image(image, points, color=(0, 0, 255), radius=3):
     output_image = image.copy()
     for (x, y) in points.astype(int):
         cv2.circle(output_image, (x, y), radius, color, -1)
-    output_image = cv2.cvtColor(output_image, cv2.COLOR_BGR2RGBA)
+    # output_image = cv2.cvtColor(output_image, cv2.COLOR_BGR2RGBA)
     return output_image
 
 
-def auto_grid_generator(
+def auto_mask_generator(
     image: np.ndarray,
     model: SAM2Base,
     points_per_side: Optional[int] = 32,
@@ -49,28 +50,54 @@ def auto_grid_generator(
     output_mode: str = "binary_mask",
     use_m2m: bool = False,
     multimask_output: bool = True,
+    base: str = "sam2",
+    mask_level: str = "large"
 ):
-    mask_generator = SAM2AutomaticMaskGenerator(
-        model,
-        points_per_side=points_per_side,
-        points_per_batch=points_per_batch,
-        pred_iou_thresh=pred_iou_thresh,
-        stability_score_thresh=stability_score_thresh,
-        stability_score_offset=stability_score_offset,
-        mask_threshold=mask_threshold,
-        crop_n_layers=crop_n_layers,
-        crop_nms_thresh=crop_nms_thresh,
-        crop_overlap_ratio=crop_overlap_ratio,
-        box_nms_thresh=box_nms_thresh,
-        crop_n_points_downscale_factor=crop_n_points_downscale_factor,
-        point_grids=point_grids,
-        min_mask_region_area=min_mask_region_area,
-        output_mode=output_mode,
-        use_m2m=use_m2m,
-        multimask_output=multimask_output
-    )
+    if base == "sam":
+        mask_generator = SamAutomaticMaskGenerator(
+            model,
+            points_per_side=points_per_side,
+            points_per_batch=points_per_batch,
+            pred_iou_thresh=pred_iou_thresh,
+            stability_score_thresh=stability_score_thresh,
+            stability_score_offset=stability_score_offset,
+            # mask_threshold=mask_threshold,
+            crop_n_layers=crop_n_layers,
+            crop_nms_thresh=crop_nms_thresh,
+            crop_overlap_ratio=crop_overlap_ratio,
+            # box_nms_thresh=box_nms_thresh,
+            crop_n_points_downscale_factor=crop_n_points_downscale_factor,
+            point_grids=point_grids,
+            min_mask_region_area=min_mask_region_area,
+            output_mode=output_mode,
+            # use_m2m=use_m2m,
+            # multimask_output=multimask_output
+        )
+        _, masks_s, masks_m, masks_l = mask_generator.generate(image)
+        masks = masks_l
 
-    masks = mask_generator.generate(image)
+    else:  # if base == "sam2"
+        mask_generator = SAM2AutomaticMaskGenerator(
+            model,
+            points_per_side=points_per_side,
+            points_per_batch=points_per_batch,
+            pred_iou_thresh=pred_iou_thresh,
+            stability_score_thresh=stability_score_thresh,
+            stability_score_offset=stability_score_offset,
+            mask_threshold=mask_threshold,
+            crop_n_layers=crop_n_layers,
+            crop_nms_thresh=crop_nms_thresh,
+            crop_overlap_ratio=crop_overlap_ratio,
+            box_nms_thresh=box_nms_thresh,
+            crop_n_points_downscale_factor=crop_n_points_downscale_factor,
+            point_grids=point_grids,
+            min_mask_region_area=min_mask_region_area,
+            output_mode=output_mode,
+            use_m2m=use_m2m,
+            multimask_output=multimask_output
+        )
+        masks = mask_generator.generate(image)
+
     for idx, mask in enumerate(masks):
         ic(idx, mask["area"])
     point_coords_array = np.array([mask['point_coords'][0] for mask in masks])
