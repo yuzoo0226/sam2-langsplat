@@ -1,4 +1,5 @@
 import os
+import sys
 import cv2
 import glob
 import copy
@@ -11,6 +12,7 @@ import matplotlib.pyplot as plt
 import dearpygui.dearpygui as dpg
 from PIL import Image
 from icecream import ic
+import threading
 
 import torch
 
@@ -18,23 +20,29 @@ import torch
 from sam2.build_sam import build_sam2_video_predictor, build_sam2
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 from utils.grid_generator import generate_uniform_grid, draw_points_on_image, auto_mask_generator
-from utils.mask_utils import apply_mask_to_rgba_image, apply_mask_to_image, filter_overlapping_masks, combined_all_mask, has_same_mask, calculate_overlap_ratio
+from utils.mask_utils import apply_mask_to_rgba_image, apply_mask_to_image, filter_overlapping_masks, combined_all_mask, has_same_mask, calculate_overlap_ratio, visualize_instance
 from utils.clip_utils import OpenCLIPNetwork, OpenCLIPNetworkConfig
 from clip_utils import get_features_from_image_and_masks
 from segment_anything_langsplat import sam_model_registry
 
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QLabel, QPushButton, QVBoxLayout, QHBoxLayout, QFileDialog,
+    QSlider, QLineEdit, QComboBox, QWidget
+)
+from PyQt6.QtGui import QPixmap, QImage
+from PyQt6.QtCore import Qt
 
-class TrackingViewer:
-    """A GUI application for viewing sorted images with navigation support."""
 
-    def __init__(self, image_dir: str, sam_checkpoint: str, sam_config: str, is_viewer=True, is_debug=True, keyframe_interval: int = 0) -> None:
-        """Initialize the image viewer with the given image folder."""
+class TrackingViewer(QMainWindow):
+    def __init__(self, image_dir: str, sam_checkpoint: str, sam_config: str, based_gui="dgp", is_viewer=True, is_debug=True, keyframe_interval: int = 0, frame_number: bool = False) -> None:
+        """A GUI application for viewing sorted images with navigation support."""
+        super().__init__()
         self.image_dir = image_dir
         self.video_path = None
         self.images = self._load_images(ext="jpg")
         h, w = cv2.imread(self.images[0], 0).shape
-        self.main_image_size = max(h, w)
-        self.sub_image_size = max(h, w) // 2
+        # self.main_image_size = max(h, w)
+        # self.sub_image_size = max(h, w) // 2
 
         self.main_image_width = w
         self.main_image_height = h
@@ -70,8 +78,15 @@ class TrackingViewer:
 
         self.is_viewer = is_viewer
         self.is_debug = is_debug
+        self.based_gui = based_gui
+        self.with_frame_number = frame_number
+        self.visualization_mode = "mask"
+
         if is_viewer:
-            self._setup_gui()
+            if based_gui == "dgp":
+                self._setup_gui()
+            else:
+                self.initUI()
 
     def _load_images(self, ext="png") -> Dict[int, str]:
         """Load and sort images from the specified folder.
@@ -165,6 +180,10 @@ class TrackingViewer:
             print(output_path)
             cv2.imwrite(output_path, frame)
 
+    def resize_sub_image(self, image):
+        h, w = image.shape[:2]
+        return cv2.resize(image, (w//self.show_subimage_scale, h//self.show_subimage_scale), interpolation=cv2.INTER_AREA)
+
     def set_before1_image(self, image):
         image = cv2.resize(image, (int(self.main_image_width * (1/self.show_subimage_scale)), int(self.main_image_height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
         dpg.set_value(self.before1_image_texture, image)
@@ -189,7 +208,7 @@ class TrackingViewer:
         dpg.set_value(self.select_image_texture, image)
         dpg.configure_item(self.select_image_texture)
 
-    def create_video_callback(self, sender: str, app_data: str) -> None:
+    def create_video_callback(self, sender: str = None, app_data: str = None) -> None:
         """create video from selected folder
 
         Args:
@@ -198,7 +217,7 @@ class TrackingViewer:
         """
         self.video_path = self._create_video_from_folder(self.image_dir)
 
-    def rename_folder_callback(self, sender: str, app_data: str) -> None:
+    def rename_folder_callback(self, sender: str = None, app_data: str = None) -> None:
         """create video from selected folder
 
         Args:
@@ -207,52 +226,103 @@ class TrackingViewer:
         """
         self._rename_folder(self.image_dir)
 
-    def update_images(self, sender: int, app_data: int) -> None:
+    def update_images(self, sender: int = None, app_data: int = None) -> None:
         """Update displayed images based on slider value."""
-        idx = int(app_data)
+        if self.based_gui == "dgp":
+            idx = int(app_data)
+        else:
+            idx = int(sender)
+            self.slider_value_display.setText(str(idx))
+
         self.target_frame_idx = idx
         self.ann_frame_idx = idx
+
+        try:
+            ic(self.images[idx])
+        except (IndexError, KeyError) as e:
+            ic(e)
+            return
 
         if self.target_mask_idx == -1:
             if idx in self.images:
                 width, height, channels, image_data = self._load_texture(self.images[idx])
-                dpg.set_value(self.select_image_texture, image_data)
-                dpg.configure_item(self.select_image_texture)
+                if self.based_gui == "dgp":
+                    dpg.set_value(self.select_image_texture, image_data)
+                    dpg.configure_item(self.select_image_texture)
+                else:
+                    image = cv2.imread(self.images[idx])
+                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
+                    self.set_image(self.label_selected, image)
 
             if idx - 2 in self.images:
                 width, height, channels, image_data = self._load_texture(self.images[idx - 2])
-                resized_image = cv2.resize(image_data, (int(width * (1/self.show_subimage_scale)), int(height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
-                dpg.set_value(self.before2_image_texture, resized_image)
-                dpg.configure_item(self.before2_image_texture)
+                if self.based_gui == "dpg":
+                    resized_image = cv2.resize(image_data, (int(width * (1/self.show_subimage_scale)), int(height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
+                    dpg.set_value(self.before2_image_texture, resized_image)
+                    dpg.configure_item(self.before2_image_texture)
+                else:
+                    image = cv2.imread(self.images[idx-2])
+                    image = cv2.resize(image, (int(width * (1/self.show_subimage_scale)), int(height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
+                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
+                    self.set_image(self.label_before2, image)
             else:
-                dpg.set_value(self.before2_image_texture, self.blank_sub_image)
+                if self.based_gui == "dpg":
+                    dpg.set_value(self.before2_image_texture, self.blank_sub_image)
+                else:
+                    self.set_image(self.label_before2, self.blank_sub_image)
 
             if idx - 1 in self.images:
                 width, height, channels, image_data = self._load_texture(self.images[idx - 1])
-                resized_image = cv2.resize(image_data, (int(width * (1/self.show_subimage_scale)), int(height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
-                dpg.set_value(self.before1_image_texture, resized_image)
-                dpg.configure_item(self.before1_image_texture)
+                if self.based_gui == "dpg":
+                    resized_image = cv2.resize(image_data, (int(width * (1/self.show_subimage_scale)), int(height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
+                    dpg.set_value(self.before1_image_texture, resized_image)
+                    dpg.configure_item(self.before1_image_texture)
+                else:
+                    image = cv2.imread(self.images[idx-1])
+                    image = cv2.resize(image, (int(width * (1/self.show_subimage_scale)), int(height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
+                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
+                    self.set_image(self.label_before1, image)
             else:
-                dpg.set_value(self.before1_image_texture, self.blank_sub_image)
+                if self.based_gui == "dpg":
+                    dpg.set_value(self.before1_image_texture, self.blank_sub_image)
+                else:
+                    self.set_image(self.label_before1, self.blank_sub_image)
 
             if idx + 1 in self.images:
                 width, height, channels, image_data = self._load_texture(self.images[idx + 1])
-                resized_image = cv2.resize(image_data, (int(width * (1/self.show_subimage_scale)), int(height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
-                dpg.set_value(self.next1_image_texture, resized_image)
-                dpg.configure_item(self.next1_image_texture, width=width//2, height=height//2)
+                if self.based_gui == "dpg":
+                    resized_image = cv2.resize(image_data, (int(width * (1/self.show_subimage_scale)), int(height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
+                    dpg.set_value(self.next1_image_texture, resized_image)
+                    dpg.configure_item(self.next1_image_texture, width=width//2, height=height//2)
+                else:
+                    image = cv2.imread(self.images[idx+1])
+                    image = cv2.resize(image, (int(width * (1/self.show_subimage_scale)), int(height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
+                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
+                    self.set_image(self.label_next1, image)
             else:
-                dpg.set_value(self.next1_image_texture, self.blank_sub_image)
+                if self.based_gui == "dpg":
+                    dpg.set_value(self.next1_image_texture, self.blank_sub_image)
+                else:
+                    self.set_image(self.label_next1, self.blank_sub_image)
 
             if idx + 2 in self.images:
                 width, height, channels, image_data = self._load_texture(self.images[idx + 2])
-                resized_image = cv2.resize(image_data, (int(width * (1/self.show_subimage_scale)), int(height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
-                dpg.set_value(self.next2_image_texture, resized_image)
-                dpg.configure_item(self.next2_image_texture, width=width//2, height=height//2)
+                if self.based_gui == "dpg":
+                    resized_image = cv2.resize(image_data, (int(width * (1/self.show_subimage_scale)), int(height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
+                    dpg.set_value(self.next2_image_texture, resized_image)
+                    dpg.configure_item(self.next2_image_texture, width=width//2, height=height//2)
+                else:
+                    image = cv2.imread(self.images[idx+2])
+                    image = cv2.resize(image, (int(width * (1/self.show_subimage_scale)), int(height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
+                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
+                    self.set_image(self.label_before1, image)
             else:
-                dpg.set_value(self.next2_image_texture, self.blank_sub_image)
-
+                if self.based_gui == "dpg":
+                    dpg.set_value(self.next2_image_texture, self.blank_sub_image)
+                else:
+                    self.set_image(self.label_next2, self.blank_sub_image)
         else:
-            self.mask_select_callback("", str(self.target_mask_idx))
+            self.mask_select_callback(str(self.target_mask_idx))
 
     def mask_to_numpy(self, mask, image, obj_id=None, random_color=False, visualize=False, filename=None, anns_obj_id=None, borders=True, use_rgb=False):
         if use_rgb:
@@ -358,12 +428,23 @@ class TrackingViewer:
             np.delete(segmentation_array, idx)
 
         if self.video_segments != {}:
-            masks = self.video_segments[self.ann_frame_idx].values()
+            # masks = self.video_segments[self.ann_frame_idx].values()
+            keys = self.video_segments[self.ann_frame_idx].keys()
+            ic(keys)
             combined_mask = combined_all_mask(self.video_segments[self.ann_frame_idx])
 
             for idx, target_mask in enumerate(segmentation_array):
-                if has_same_mask(target_mask, masks):
+                same_mask_idx = has_same_mask(target_mask, self.video_segments[self.ann_frame_idx])
+                if same_mask_idx > 0:
                     removed_indices.append(idx)
+
+                    ic(f"[Add mask] append mask {idx} in frame_{self.ann_frame_idx}.jpg as obj_id: {same_mask_idx}")
+                    _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_mask(
+                        inference_state=self.inference_state,
+                        frame_idx=ann_frame_idx,
+                        obj_id=same_mask_idx,
+                        mask=target_mask
+                    )
 
                 overlap_ratio = calculate_overlap_ratio(combined_mask, target_mask)
                 # ic(idx, overlap_ratio)
@@ -375,7 +456,7 @@ class TrackingViewer:
             if idx in removed_indices:
                 continue
 
-            ic(f"append obj {idx} in {self.ann_frame_idx} as {ann_obj_id+append_obj_id}")
+            ic(f"[New obj] append mask {idx} in frame_{self.ann_frame_idx}.jpg as obj_id: {ann_obj_id+append_obj_id}")
             _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_mask(
                 inference_state=self.inference_state,
                 frame_idx=ann_frame_idx,
@@ -416,15 +497,16 @@ class TrackingViewer:
         cv2.imwrite("anns.jpg", img*255)
 
         if self.is_viewer:
-            dpg.set_value(self.select_image_texture, img)
-            dpg.configure_item(self.select_image_texture)
+            self.set_image(self.label_selected, img)
+            # dpg.set_value(self.select_image_texture, img)
+            # dpg.configure_item(self.select_image_texture)
 
     def del_inference_state_image(self):
         self.inference_state["images"] = self.inference_state["images"][1:]
         self.inference_state["num_frames"] -= 1
         # self.frame_names = self.frame_names[1:]
 
-    def reset_mask_callback(self, sender: str, app_data: str) -> None:
+    def reset_mask_callback(self, sender: str = None, app_data: str = None) -> None:
         """reset target mask idx and show unmasked image
 
         Args:
@@ -432,102 +514,186 @@ class TrackingViewer:
             app_data (str): Additional data from the widget.
         """
         self.target_mask_idx = -1
-        self.update_images("", str(self.target_frame_idx))
+        self.update_images(str(self.target_frame_idx), str(self.target_frame_idx))
 
-    def mask_select_callback(self, sender: str, app_data: str) -> None:
+    def mask_select_callback(self, sender: int = None, app_data: int = None) -> None:
         """mask selection
 
         Args:
             sender (str): The ID of the widget that triggered this callback.
             app_data (str): Additional data from the widget.
         """
-        ic(f"Selected Item: {app_data}")
-        self.target_mask_idx: int = int(app_data)
+        if self.based_gui == "dgp":
+            ic(f"Selected Item: {app_data}")
+            self.target_mask_idx: int = int(app_data)
+        else:
+            ic(f"Selected Item: {sender}")
+            self.target_mask_idx: int = int(sender)
 
         target_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx]))
         if self.target_mask_idx > 0:
-            target_mask = self.video_segments[self.target_frame_idx][self.target_mask_idx].squeeze()
+            if self.based_gui == "dgp":
+                target_mask = self.video_segments[self.target_frame_idx][self.target_mask_idx].squeeze()
+            else:
+                try:
+                    target_mask = self.video_segments[self.target_frame_idx][self.target_mask_idx].squeeze()
+                except Exception as e:
+                    target_mask = self.blank_main_image
 
             try:
                 before1_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx-1]))
                 before1_mask = self.video_segments[self.target_frame_idx-1][self.target_mask_idx].squeeze()
                 before1_masked_image = apply_mask_to_image(before1_image, before1_mask)
                 before1_masked_image = cv2.cvtColor(before1_masked_image, cv2.COLOR_BGR2RGBA)
-                self.set_before1_image(before1_masked_image/255)
+                if self.based_gui == "dgp":
+                    self.set_before1_image(before1_masked_image/255)
+                else:
+                    self.set_image(self.label_before1, before1_masked_image, auto_resize=True)
             except Exception as e:
-                self.set_before1_image(self.blank_sub_image)
+                if self.based_gui == "dgp":
+                    self.set_before1_image(self.blank_sub_image)
+                else:
+                    self.set_image(self.label_before1, self.blank_sub_image)
 
             try:
                 before2_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx-2]))
                 before2_mask = self.video_segments[self.target_frame_idx-2][self.target_mask_idx].squeeze()
                 before2_masked_image = apply_mask_to_image(before2_image, before2_mask)
                 before2_masked_image = cv2.cvtColor(before2_masked_image, cv2.COLOR_BGR2RGBA)
-                self.set_before2_image(before2_masked_image/255)
+                if self.based_gui == "dgp":
+                    self.set_before2_image(before2_masked_image/255)
+                else:
+                    self.set_image(self.label_before2, before2_masked_image, auto_resize=True)
             except Exception as e:
-                self.set_before2_image(self.blank_sub_image)
+                if self.based_gui == "dgp":
+                    self.set_before2_image(self.blank_sub_image)
+                else:
+                    self.set_image(self.label_before2, self.blank_sub_image)
 
             try:
                 next1_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx+1]))
                 next1_mask = self.video_segments[self.target_frame_idx+1][self.target_mask_idx].squeeze()
                 next1_masked_image = apply_mask_to_image(next1_image, next1_mask)
                 next1_masked_image = cv2.cvtColor(next1_masked_image, cv2.COLOR_BGR2RGBA)
-                self.set_next1_image(next1_masked_image/255)
+                if self.based_gui == "dgp":
+                    self.set_next1_image(next1_masked_image/255)
+                else:
+                    self.set_image(self.label_next1, next1_masked_image, auto_resize=True)
             except Exception as e:
-                self.set_next1_image(self.blank_sub_image)
+                if self.based_gui == "dgp":
+                    self.set_next1_image(self.blank_sub_image)
+                else:
+                    self.set_image(self.label_next1, self.blank_sub_image)
 
             try:
                 next2_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx+2]))
                 next2_mask = self.video_segments[self.target_frame_idx+2][self.target_mask_idx].squeeze()
                 next2_masked_image = apply_mask_to_image(next2_image, next2_mask)
                 next2_masked_image = cv2.cvtColor(next2_masked_image, cv2.COLOR_BGR2RGBA)
-                self.set_next2_image(next2_masked_image/255)
+                if self.based_gui == "dgp":
+                    self.set_next2_image(next2_masked_image/255)
+                else:
+                    self.set_image(self.label_next2, next2_masked_image, auto_resize=True)
             except Exception as e:
-                self.set_next2_image(self.blank_sub_image)
+                if self.based_gui == "dgp":
+                    self.set_next2_image(self.blank_sub_image)
+                else:
+                    self.set_image(self.label_next2, self.blank_sub_image)
 
         else:
-            target_mask = combined_all_mask(self.video_segments[self.target_frame_idx])
+            if self.based_gui == "dgp":
+                if self.visualization_mode == "mask":
+                    target_mask = combined_all_mask(self.video_segments[self.target_frame_idx])
+                else:
+                    masked_image = visualize_instance(self.video_segments[self.target_frame_idx])
+            else:
+                try:
+                    if self.visualization_mode == "mask":
+                        target_mask = combined_all_mask(self.video_segments[self.target_frame_idx])
+                    else:
+                        masked_image = visualize_instance(self.video_segments[self.target_frame_idx])
+                except Exception as e:
+                    target_mask = self.blank_main_image
+            try:
+                if self.visualization_mode == "mask":
+                    before1_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx-1]))
+                    before1_mask = combined_all_mask(self.video_segments[self.target_frame_idx-1])
+                    before1_masked_image = apply_mask_to_image(before1_image, before1_mask)
+                    before1_masked_image = cv2.cvtColor(before1_masked_image, cv2.COLOR_BGR2RGBA)
+                else:
+                    before1_masked_image = visualize_instance(self.video_segments[self.target_frame_idx-1])
+                if self.based_gui == "dgp":
+                    self.set_before1_image(before1_masked_image/255)
+                else:
+                    self.set_image(self.label_before1, before1_masked_image, auto_resize=True)
+            except Exception as e:
+                if self.based_gui == "dgp":
+                    self.set_before1_image(self.blank_sub_image)
+                else:
+                    self.set_image(self.label_before1, self.blank_sub_image)
 
             try:
-                before1_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx-1]))
-                before1_mask = combined_all_mask(self.video_segments[self.target_frame_idx-1])
-                before1_masked_image = apply_mask_to_image(before1_image, before1_mask)
-                before1_masked_image = cv2.cvtColor(before1_masked_image, cv2.COLOR_BGR2RGBA)
-                self.set_before1_image(before1_masked_image/255)
+                if self.visualization_mode == "mask":
+                    before2_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx-2]))
+                    before2_mask = combined_all_mask(self.video_segments[self.target_frame_idx-2])
+                    before2_masked_image = apply_mask_to_image(before2_image, before2_mask)
+                    before2_masked_image = cv2.cvtColor(before2_masked_image, cv2.COLOR_BGR2RGBA)
+                else:
+                    before2_masked_image = visualize_instance(self.video_segments[self.target_frame_idx-2])
+                if self.based_gui == "dgp":
+                    self.set_before2_image(before2_masked_image/255)
+                self.set_image(self.label_before2, before2_masked_image, auto_resize=True)
             except Exception as e:
-                self.set_before1_image(self.blank_sub_image)
+                self.set_image(self.label_before2, self.blank_sub_image)
+                # self.set_before2_image(self.blank_sub_image)
 
             try:
-                before2_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx-2]))
-                before2_mask = combined_all_mask(self.video_segments[self.target_frame_idx-2])
-                before2_masked_image = apply_mask_to_image(before2_image, before2_mask)
-                before2_masked_image = cv2.cvtColor(before2_masked_image, cv2.COLOR_BGR2RGBA)
-                self.set_before2_image(before2_masked_image/255)
+                if self.visualization_mode == "mask":
+                    next1_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx+1]))
+                    next1_mask = combined_all_mask(self.video_segments[self.target_frame_idx+1])
+                    next1_masked_image = apply_mask_to_image(next1_image, next1_mask)
+                    next1_masked_image = cv2.cvtColor(next1_masked_image, cv2.COLOR_BGR2RGBA)
+                else:
+                    next1_masked_image = visualize_instance(self.video_segments[self.target_frame_idx+1])
+                if self.based_gui == "dgp":
+                    self.set_next1_image(next1_masked_image/255)
+                else:
+                    self.set_image(self.label_next1, next1_masked_image, auto_resize=True)
             except Exception as e:
-                self.set_before2_image(self.blank_sub_image)
+                if self.based_gui == "dgp":
+                    self.set_next1_image(self.blank_sub_image)
+                else:
+                    self.set_image(self.label_next1, self.blank_sub_image)
 
             try:
-                next1_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx+1]))
-                next1_mask = combined_all_mask(self.video_segments[self.target_frame_idx+1])
-                next1_masked_image = apply_mask_to_image(next1_image, next1_mask)
-                next1_masked_image = cv2.cvtColor(next1_masked_image, cv2.COLOR_BGR2RGBA)
-                self.set_next1_image(next1_masked_image/255)
+                if self.visualization_mode == "mask":
+                    next2_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx+2]))
+                    next2_mask = combined_all_mask(self.video_segments[self.target_frame_idx+2])
+                    next2_masked_image = apply_mask_to_image(next2_image, next2_mask)
+                    next2_masked_image = cv2.cvtColor(next2_masked_image, cv2.COLOR_BGR2RGBA)
+                else:
+                    next2_masked_image = visualize_instance(self.video_segments[self.target_frame_idx+2])
+                if self.based_gui == "dgp":
+                    self.set_next2_image(next2_masked_image/255)
+                else:
+                    self.set_image(self.label_next2, next2_masked_image, auto_resize=True)
             except Exception as e:
-                self.set_next1_image(self.blank_sub_image)
+                if self.based_gui == "dgp":
+                   self.set_next2_image(self.blank_sub_image)
+                else:
+                    self.set_image(self.label_next2, self.blank_sub_image)
+        try:
+            if self.visualization_mode == "mask":
+                masked_image = apply_mask_to_image(target_image, target_mask)
+                masked_image = cv2.cvtColor(masked_image, cv2.COLOR_BGR2RGBA)
+            if self.based_gui == "dgp":
+                self.set_main_image(masked_image/255)
+            else:
+                self.set_image(self.label_selected, masked_image)
+        except Exception as e:
+            ic(e)
 
-            try:
-                next2_image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.target_frame_idx+2]))
-                next2_mask = combined_all_mask(self.video_segments[self.target_frame_idx+2])
-                next2_masked_image = apply_mask_to_image(next2_image, next2_mask)
-                next2_masked_image = cv2.cvtColor(next2_masked_image, cv2.COLOR_BGR2RGBA)
-                self.set_next2_image(next2_masked_image/255)
-            except Exception as e:
-                self.set_next2_image(self.blank_sub_image)
-
-        masked_image = apply_mask_to_image(target_image, target_mask)
-        masked_image = cv2.cvtColor(masked_image, cv2.COLOR_BGR2RGBA)
-        self.set_main_image(masked_image/255)
-
-    def add_mask_to_blank_area(self, sender: str, app_data: str) -> None:
+    def add_mask_to_blank_area(self, sender: str = None, app_data: str = None) -> None:
         """_summary_
 
         Args:
@@ -559,7 +725,7 @@ class TrackingViewer:
         self.target_frame_idx = idx
         self.ann_frame_idx = idx
 
-    def dump_video_callback(self, sender: str, app_data: str) -> None:
+    def dump_video_callback(self, sender: str = None, app_data: str = None) -> None:
         """dump gif each obj_id
 
         Args:
@@ -568,6 +734,7 @@ class TrackingViewer:
         """
         try:
             import imageio
+
         except ModuleNotFoundError as e:
             ic(e)
             ic("Please Install imageio with following commands, ``pip install imageio''")
@@ -581,6 +748,8 @@ class TrackingViewer:
                 current_mask = masks[obj_id].squeeze()
                 image = cv2.imread(self.images[frame_id])
                 current_bgr = apply_mask_to_image(image, current_mask)
+                if self.with_frame_number:
+                    current_bgr = cv2.putText(current_bgr, f"frame_{frame_id}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
                 mp4_data.append(current_bgr)
                 gif_data.append(cv2.cvtColor(current_bgr, cv2.COLOR_BGR2RGB))
 
@@ -596,7 +765,14 @@ class TrackingViewer:
             for img in mp4_data:
                 video_writer.write(img)
 
-    def dump_mask_npy_callback(self, sender: str, app_data: str) -> None:
+        output_path = "./temp/output_instance_visualizer.mp4"
+        video_writer = cv2.VideoWriter(output_path, fourcc, 1, (width, height))
+        for idx in range(len(self.frame_names)):
+            image = visualize_instance(self.video_segments[idx])
+            image = cv2.cvtColor(image, cv2.COLOR_RGBA2BGR)
+            video_writer.write(image)
+
+    def dump_mask_npy_callback(self, sender: str = None, app_data: str = None) -> None:
         """Dump Mask as Numpy Array
 
         Args:
@@ -612,9 +788,11 @@ class TrackingViewer:
             for label, mask in masks.items():
                 output_array[3][mask[0]] = label
 
+            ic(output_path)
+
             np.save(output_path, np.array(output_array, dtype=np.float32))
 
-    def dump_feature_callback(self, sender: str, app_data: str) -> None:
+    def dump_feature_callback(self, sender: str = None, app_data: str = None) -> None:
         """Dump CLIP Features
 
         Args:
@@ -638,7 +816,10 @@ class TrackingViewer:
             masked_bgr = apply_mask_to_image(image, target_mask)
             if self.is_viewer:
                 visualized_image = cv2.cvtColor(masked_bgr, cv2.COLOR_BGR2RGBA)
-                self.set_main_image(visualized_image/255)
+                if self.based_gui == "dgp":
+                    self.set_main_image(visualized_image/255)
+                else:
+                    self.set_image(self.label_selected, visualized_image)
             region_feature = get_features_from_image_and_masks(self.clip_model, image, torch.from_numpy(target_mask_torch), background=0.)
             # self.clip_model.encode_image(torch.from_numpy(masked_bgr.astype(np.float32)).permute(2, 0, 1).to("cuda"))
             ic(obj_id, target_frame, max_area, region_feature)
@@ -646,6 +827,12 @@ class TrackingViewer:
             region_features.append(region_feature)
 
         np.save(output_path, np.array(region_features, dtype=np.float32))
+
+    def visualize_instance_callback(self, sender: str = None, app_data: str = None) -> None:
+        self.visualization_mode = "instance"
+        self.update_images(self.target_frame_idx, self.target_frame_idx)
+        # target_image = visualize_instance(self.video_segments[self.target_frame_idx])
+        # self.set_image(self.label_selected, target_image)
 
     def segment_whole_video(self) -> None:
         """Segment the whole video."""
@@ -657,17 +844,16 @@ class TrackingViewer:
             for obj_idx, segment in enumerate(out_mask_logits):
                 _ = self.mask_to_numpy(segment, image, filename=frame_name, anns_obj_id=obj_idx)
 
-    def segment_video_callback(self, sender: str, app_data: str) -> None:
+    def segment_video_callback(self, sender: str = None, app_data: str = None) -> None:
         """Segment for Selected video
 
         Args:
             sender (str): The ID of the widget that triggered this callback.
             app_data (str): Additional data from the widget.
         """
-        for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state):
-            self.video_segments[out_frame_idx] = {
-                out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy() for i, out_obj_id in enumerate(out_obj_ids)
-            }
+        ic(self.keyframe_interval)
+        image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.ann_frame_idx]))
+        out_obj_ids, out_mask_logits = self.mask_point_generation(self.ann_frame_idx, self.ann_obj_id, height=self.main_image_height, width=self.main_image_width, num_points=16*16, image=image)
 
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.ann_frame_idx]))
@@ -676,9 +862,8 @@ class TrackingViewer:
             # out_obj_ids, out_mask_logits = self.mask_point_generation(self.ann_frame_idx, self.ann_obj_id, height=h, width=w, num_points=16*16, image=image_float)
             self.ann_obj_id = out_obj_ids[-1]
 
-            ic(self.keyframe_interval)
             if self.keyframe_interval > 0:
-                for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state, start_frame_idx=max(0, self.ann_frame_idx-self.keyframe_interval), max_frame_num_to_track=(self.keyframe_interval*2)):
+                for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state, start_frame_idx=max(0, self.ann_frame_idx-self.keyframe_interval), max_frame_num_to_track=(self.ann_frame_idx+self.keyframe_interval)):
                     self.video_segments[out_frame_idx] = {
                         out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy() for i, out_obj_id in enumerate(out_obj_ids)
                     }
@@ -696,11 +881,110 @@ class TrackingViewer:
                     _ = self.mask_to_numpy(segment, image, filename=output_filename, anns_obj_id=obj_idx)
 
             if self.is_viewer:
-                self.mask_indices = [0] + out_obj_ids
-                dpg.configure_item("mask_select", items=self.mask_indices)
+                self.mask_indices = []
+                self.mask_indices = [0] + out_obj_ids + [999]
+                # dpg.configure_item("mask_select", items=self.mask_indices)
+                self.mask_select.addItems([str(i) for i in self.mask_indices])
+                self.mask_select.currentIndexChanged.connect(self.mask_select_callback)
 
                 self.target_mask_idx = 0
-                self.mask_select_callback("segment_video_callback", self.target_mask_idx)
+                self.mask_select_callback(self.target_mask_idx)
+
+    def initUI(self):
+        self.setWindowTitle("Tracking Anything Editor")
+        self.setGeometry(100, 100, 1550, 1200)
+
+        # メインウィジェット
+        self.central_widget = QWidget()
+        self.setCentralWidget(self.central_widget)
+
+        # メインレイアウト
+        self.layout = QVBoxLayout()
+
+        # 画像用ラベルの作成
+        self.blank_main_image = np.full((self.main_image_height, self.main_image_width, 4), 100, dtype=np.uint8)
+        self.blank_sub_image = np.full((self.sub_image_height, self.sub_image_width, 4), 30, dtype=np.uint8)
+
+        self.label_selected = QLabel(self)
+        self.label_before1 = QLabel(self)
+        self.label_before2 = QLabel(self)
+        self.label_next1 = QLabel(self)
+        self.label_next2 = QLabel(self)
+
+        self.set_image(self.label_before1, self.blank_sub_image)
+        self.set_image(self.label_before2, self.blank_sub_image)
+        self.set_image(self.label_next1, self.blank_sub_image)
+        self.set_image(self.label_next2, self.blank_sub_image)
+
+        # 画像の配置
+        image_layout = QHBoxLayout()
+        sub_image_layout = QVBoxLayout()
+        sub_image_layout.addWidget(self.label_before2)
+        sub_image_layout.addWidget(self.label_before1)
+        sub_image_layout.addWidget(self.label_next1)
+        sub_image_layout.addWidget(self.label_next2)
+        image_layout.addLayout(sub_image_layout)
+        image_layout.addWidget(self.label_selected)
+
+        self.layout.addLayout(image_layout)
+
+        # スライダー
+        slider_layout = QHBoxLayout()
+        self.slider = QSlider(Qt.Orientation.Horizontal)  # 水平方向
+        self.slider.setMinimum(0)
+        self.slider.setMaximum(self.num_images - 1)
+        self.slider.valueChanged.connect(self.update_images)
+        slider_layout.addWidget(self.slider)
+
+        self.slider_value_display = QLineEdit()
+        self.slider_value_display.setFixedWidth(50)
+        self.slider_value_display.setText("0")
+        self.slider_value_display.returnPressed.connect(lambda: self.update_images(int(self.slider_value_display.text())))
+        slider_layout.addWidget(self.slider_value_display)
+
+        self.layout.addLayout(slider_layout)
+
+        # 動画パス入力
+        self.video_path = QLineEdit("/mnt/home/yuga-y/usr/splat_ws/third_party/SegAnyGAussians/models/vae_v6.pt")
+        self.layout.addWidget(self.video_path)
+
+        # セグメントボタン
+        self.segment_button = QPushButton("Segment Video")
+        self.segment_button.clicked.connect(self.segment_video_callback)
+        self.layout.addWidget(self.segment_button)
+
+        # キーフレーム間隔入力
+        # self.keyframe_interval = QLineEdit("0")
+        # self.layout.addWidget(self.keyframe_interval)
+
+        # マスク選択
+        self.mask_select = QComboBox()
+        self.layout.addWidget(self.mask_select)
+
+        # マスクリセットボタン
+        self.reset_mask_button = QPushButton("Reset Mask")
+        self.layout.addWidget(self.reset_mask_button)
+        self.reset_mask_button.clicked.connect(self.reset_mask_callback)
+
+        # 出力ボタン
+        self.dump_gif_button = QPushButton("Dump segmentation results as GIF")
+        self.dump_gif_button.clicked.connect(self.dump_video_callback) 
+        self.layout.addWidget(self.dump_gif_button)
+        self.dump_npy_button = QPushButton("Dump segmentation results as NPY")
+        self.dump_npy_button.clicked.connect(self.dump_mask_npy_callback)
+        self.layout.addWidget(self.dump_npy_button)
+        self.dump_feature_button = QPushButton("Dump feature")
+        self.dump_feature_button.clicked.connect(self.dump_feature_callback)
+        self.layout.addWidget(self.dump_feature_button)
+        self.visualize_instance_button = QPushButton("Visualize instance as Color")
+        self.visualize_instance_button.clicked.connect(self.visualize_instance_callback)
+        self.layout.addWidget(self.visualize_instance_button)
+
+        self.auto_segmentation_all_frame_button = QPushButton("Segmentation All Frame")
+        self.auto_segmentation_all_frame_button.clicked.connect(self.auto_scenario)
+        self.layout.addWidget(self.auto_segmentation_all_frame_button)
+
+        self.central_widget.setLayout(self.layout)
 
     def _setup_gui(self) -> None:
         """Setup the Dear PyGUI layout."""
@@ -763,25 +1047,55 @@ class TrackingViewer:
         dpg.show_viewport()
         dpg.start_dearpygui()
 
+    def auto_scenario(self, sender: str = None, app_data: str = None) -> None:
+        """Auto Scenario
+        Args:
+            sender (str): The ID of the widget that triggered this callback.
+            app_data (str): Additional data from the widget.
+        """
+        # def auto_scenario_thread():
+        interval = self.keyframe_interval
+
+        for idx in range(0, len(self.images), interval):
+            ic(f"target_frame is {idx}")
+            self.change_target_frame_idx(idx)
+            self.segment_video_callback()
+
+        # viewer.segment_whole_video()
+        viewer.dump_video_callback()
+        viewer.dump_mask_npy_callback()
+        viewer.dump_feature_callback()
+
+        # thread = threading.Thread(target=auto_scenario_thread)
+        # thread.start()
+
+    def set_image(self, label, image_data, auto_resize=False):
+        if auto_resize:
+            image_data = self.resize_sub_image(image_data)
+        height, width, channel = image_data.shape
+        bytes_per_line = 4 * width
+        q_image = QImage(image_data.data, width, height, bytes_per_line, QImage.Format.Format_RGBA8888)
+        pixmap = QPixmap.fromImage(q_image)
+        label.setPixmap(pixmap)
+        label.setScaledContents(True)
+
 
 if __name__ == "__main__":
+    app = QApplication(sys.argv)
     parser = argparse.ArgumentParser(description="Tracking Anything GUI")
     parser.add_argument("--input_dir", "-i", default="/mnt/home/yuga-y/usr/splat_ws/datasets/lerf_ovs/figurines/renamed_images/", type=str, help="Input directory path")
     parser.add_argument("--model", "-m", default="./checkpoints/sam2.1_hiera_large.pt", type=str, help="Model checkpoint path")
     parser.add_argument("--config", "-c", default="configs/sam2.1/sam2.1_hiera_l.yaml", type=str, help="Config file path")
+    parser.add_argument("--gui", "-g", default="qt", choices=["dgp", "qt"], help="GUI library")
     parser.add_argument("--viewer_disable", "-v", action="store_false", help="Disable viewer")
     parser.add_argument("--debug", "-d", action="store_true", help="Debug mode")
-    parser.add_argument("--keyframe_interval", "-k", default=0, type=int, help="Keyframe interval")
+    parser.add_argument("--frame_number", "-f", action="store_false", help="output video with frame number")
+    parser.add_argument("--keyframe_interval", "-k", default=20, type=int, help="Keyframe interval")
     args = parser.parse_args()
 
-    viewer = TrackingViewer(args.input_dir, args.model, args.config, args.viewer_disable, is_debug=args.debug, keyframe_interval=args.keyframe_interval)
+    # viewer = TrackingViewer()
+    ic(args.gui)
+    viewer = TrackingViewer(args.input_dir, args.model, args.config, args.gui, args.viewer_disable, is_debug=args.debug, keyframe_interval=args.keyframe_interval, frame_number=args.frame_number)
 
-    if args.viewer_disable is False:
-        for idx in range(0, len(viewer.images), args.keyframe_interval):
-            viewer.change_target_frame_idx(idx)
-            viewer.segment_video_callback("temp", "temp")
-
-        viewer.segment_whole_video()
-        viewer.dump_video_callback("temp", "temp")
-        viewer.dump_mask_npy_callback("temp", "temp")
-        viewer.dump_feature_callback("temp", "temp")
+    viewer.show()
+    sys.exit(app.exec())
