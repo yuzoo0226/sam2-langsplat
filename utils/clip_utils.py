@@ -106,6 +106,10 @@ class OpenCLIPNetwork(nn.Module):
         processed_input = self.process(input).half()
         return self.model.encode_image(processed_input)
 
+    def encode_text(self, input):
+        # processed_input = self.process(input).half()
+        return self.model.encode_text(self.tokenizer(input).to("cuda"))
+
 
 def embed_clip_sam_tiles(image, sam_encoder, clip_model):
     aug_imgs = torch.cat([image])

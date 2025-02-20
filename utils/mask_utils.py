@@ -27,7 +27,7 @@ def make_anns_image(anns, borders=True, specific_id=None):
     return img
 
 
-def apply_mask_to_image(image, mask):
+def apply_mask_to_image(image, mask, convert_to_rgb=False, is_crop=False):
     """
     画像のmaskのTrueの部分のみを残し、それ以外を黒で塗りつぶす。
 
@@ -48,33 +48,67 @@ def apply_mask_to_image(image, mask):
     # 画像とマスクを適用（False の部分を黒に）
     masked_image = cv2.bitwise_and(image, mask_3ch)
 
+    if convert_to_rgb:
+        masked_image = cv2.cvtColor(masked_image, cv2.COLOR_BGR2RGB)
+
+    if is_crop:
+        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if len(contours) == 0:
+            print("cannot find contours")
+            return masked_image
+
+        x, y, w, h = cv2.boundingRect(np.vstack(contours))
+
+        # 3. BBOX 領域のみをクロップ
+        cropped_masked_image = masked_image[y:y+h, x:x+w]
+
+        padding = 20  # パディングのサイズ (必要に応じて変更)
+        padding_cropped_masked_image = cv2.copyMakeBorder(
+            cropped_masked_image,
+            top=padding, bottom=padding, left=padding, right=padding,
+            borderType=cv2.BORDER_CONSTANT,
+            value=(0, 0, 0)  # 黒い画素
+        )
+
+        return padding_cropped_masked_image
+
     return masked_image
 
 
 def apply_mask_to_rgba_image(image, mask):
     """
-    RGBA画像のmaskのTrueの部分のみを残し、それ以外を完全に黒 (透明) にする。
+    Retain only the True parts of the mask in the RGBA image, making everything else completely black (transparent).
 
     Args:
-        image (numpy.ndarray): 入力画像 (H, W, 4) (RGBA形式)
-        mask (numpy.ndarray): マスク画像 (1, 1, H, W) の形状を持つ4次元の真偽値配列
+        image (numpy.ndarray): Input image (H, W, 4) (RGBA format)
+        mask (numpy.ndarray): Mask image, a 4-dimensional boolean array with shape (1, 1, H, W)
 
     Returns:
-        numpy.ndarray: マスクを適用したRGBA画像 (H, W, 4)
+        numpy.ndarray: RGBA image with the mask applied (H, W, 4)
     """
-    # マスクを2次元に変換 (H, W)
-    mask_2d = mask.squeeze()  # (728, 986) の形に変換
+    # Convert the mask to 2D (H, W)
+    mask_2d = mask.squeeze()  # Convert to shape (H, W)
 
-    # 出力用の画像を作成（初期値は黒のRGBA）
+    # Create an output image initialized to black RGBA
     masked_image = np.zeros_like(image, dtype=np.uint8)
 
-    # マスクが True の領域のみ元の画像を適用
+    # Apply the original image only to the regions where the mask is True
     masked_image[mask_2d] = image[mask_2d]
 
     return masked_image
 
 
 def calculate_iou(mask1, mask2):
+    """
+    Calculate the Intersection over Union (IoU) of two binary masks.
+
+    Args:
+        mask1 (torch.Tensor): The first binary mask.
+        mask2 (torch.Tensor): The second binary mask.
+
+    Returns:
+        float: The IoU of the two binary masks. Returns 0 if the union is zero.
+    """
     """2つのバイナリマスクのIoUを計算"""
     intersection = torch.logical_and(mask1, mask2).sum().item()
     union = torch.logical_or(mask1, mask2).sum().item()
@@ -125,14 +159,35 @@ def filter_overlapping_masks(masks, keys, iou_threshold=0.8, del_method="smaller
     return filtered_masks, removed_indices
 
 
-def has_same_mask(target_mask: np.array, masks: np.array, th: float = 0.5) -> bool:
-    for mask in masks:
+def has_same_mask(target_mask: np.array, masks: dict, th: float = 0.5) -> int:
+    for key, mask in masks.items():
         iou = calculate_iou(torch.from_numpy(target_mask), torch.from_numpy(mask).squeeze())
         # 重なりの大きいマスクが見つかった場合にTrue
         if iou > th:
-            return True
+            return key
 
-    return False
+    return -1
+
+
+def calculate_overlap_ratio(combined_mask, target_mask):
+    """
+    Calculate the overlap ratio between two binary masks.
+
+    The overlap ratio is defined as the intersection area of the combined_mask
+    and target_mask divided by the area of the target_mask.
+
+    Parameters:
+    combined_mask (numpy.ndarray): A binary mask where the overlapping regions are to be calculated.
+    target_mask (numpy.ndarray): A binary mask representing the target area.
+
+    Returns:
+    float: The ratio of the intersection area to the target area. Returns 0 if the target area is zero.
+    """
+    intersection = np.logical_and(combined_mask, target_mask).sum()
+    target_area = target_mask.sum()
+    if target_area == 0:
+        return 0
+    return intersection / target_area
 
 
 def create_combined_mask(video_segments):
@@ -200,3 +255,38 @@ def combined_all_mask(video_segment_frame):
         target_mask = np.logical_or.reduce([target_mask, mask.squeeze()])
 
     return target_mask
+
+
+def visualize_instance(masks: dict) -> np.ndarray:
+    """
+    Visualize instance masks by assigning random colors to each unique label.
+
+    Args:
+        masks (dict): A dictionary where keys are labels and values are binary masks (numpy.ndarray).
+
+    Returns:
+        numpy.ndarray: An RGB image with the instance masks visualized.
+    """
+    height, width = next(iter(masks.values())).shape[1:]
+    output_array = np.full((height, width), -1, dtype=int)
+
+    # Save masks in lists
+    for label, mask in masks.items():
+        output_array[mask[0]] = label
+
+    # Create an output image with 3 channels (RGB)
+    output_image = np.zeros((height, width, 3), dtype=np.uint8)
+
+    # Fix the random seed for reproducibility
+    np.random.seed(42)
+
+    # Assign random colors to each label
+    label_colors = {label: np.random.randint(0, 255, size=3) for label in masks.keys()}
+
+    # Color the output image based on the labels
+    for label, color in label_colors.items():
+        output_image[output_array == label] = color
+
+    output_image = cv2.cvtColor(output_image, cv2.COLOR_BGR2RGBA)
+
+    return output_image

@@ -73,8 +73,16 @@ def auto_mask_generator(
             # use_m2m=use_m2m,
             # multimask_output=multimask_output
         )
-        _, masks_s, masks_m, masks_l = mask_generator.generate(image)
-        masks = masks_l
+        masks_all, masks_s, masks_m, masks_l = mask_generator.generate(image)
+
+        if mask_level == "small":
+            masks = masks_s
+        elif mask_level == "medium":
+            masks = masks_m
+        elif mask_level == "large":
+            masks = masks_l
+        else:
+            masks = masks_all
 
     else:  # if base == "sam2"
         mask_generator = SAM2AutomaticMaskGenerator(
