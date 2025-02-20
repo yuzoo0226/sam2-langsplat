@@ -8,5 +8,15 @@ build/*
 _C.*
 outputs/*
 checkpoints/*.pt
+checkpoints/*.pth
+checkpoints/*.pt.1
 demo/backend/checkpoints/*.pt
 temp/*
+language_features/*
+language_features_union/*
+language_features_each/*
+mask_ShapeSplat2/*
+masks_figures/*
+
+anns.jpg
+temp.png

@@ -5,6 +5,7 @@ import glob
 import copy
 import tqdm
 import time
+import random
 import argparse
 import numpy as np
 from typing import Dict, Tuple
@@ -22,6 +23,7 @@ from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
 from utils.grid_generator import generate_uniform_grid, draw_points_on_image, auto_mask_generator
 from utils.mask_utils import apply_mask_to_rgba_image, apply_mask_to_image, filter_overlapping_masks, combined_all_mask, has_same_mask, calculate_overlap_ratio, visualize_instance
 from utils.clip_utils import OpenCLIPNetwork, OpenCLIPNetworkConfig
+from utils.gpt_utils import OpenAIUtils
 from clip_utils import get_features_from_image_and_masks
 from segment_anything_langsplat import sam_model_registry
 
@@ -33,9 +35,9 @@ from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtCore import Qt
 
 
-class TrackingViewer(QMainWindow):
-# class TrackingViewer():
-    def __init__(self, image_dir: str, sam_checkpoint: str, sam_config: str, based_gui="dpg", is_viewer=True, is_debug=True, keyframe_interval: int = 0, frame_number: bool = False) -> None:
+# class TrackingViewer(QMainWindow):
+class TrackingViewer():
+    def __init__(self, image_dir: str, sam_checkpoint: str, sam_config: str, based_gui="dpg", is_viewer=True, is_debug=True, keyframe_interval: int = 0, frame_number: bool = False, feature_type="each") -> None:
         """A GUI application for viewing sorted images with navigation support."""
         super().__init__()
         self.image_dir = image_dir
@@ -82,6 +84,9 @@ class TrackingViewer(QMainWindow):
         self.based_gui = based_gui
         self.with_frame_number = frame_number
         self.visualization_mode = "mask"
+        self.mask_level = "large"
+        self.feature_type = feature_type
+        self.openai_utils = OpenAIUtils()
 
         if is_viewer:
             if based_gui == "dpg":
@@ -162,7 +167,7 @@ class TrackingViewer(QMainWindow):
         return output_path
 
     @staticmethod
-    def _rename_folder(image_dir: str, ext="jpg") -> None:
+    def _rename_folder(image_dir: str, ext="png") -> None:
 
         image_files = sorted(glob.glob(os.path.join(image_dir, f"*.{ext}")))
 
@@ -316,7 +321,7 @@ class TrackingViewer(QMainWindow):
                     image = cv2.imread(self.images[idx+2])
                     image = cv2.resize(image, (int(width * (1/self.show_subimage_scale)), int(height * (1/self.show_subimage_scale))), interpolation=cv2.INTER_AREA)
                     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
-                    self.set_image(self.label_before1, image)
+                    self.set_image(self.label_next2, image)
             else:
                 if self.based_gui == "dpg":
                     dpg.set_value(self.next2_image_texture, self.blank_sub_image)
@@ -379,18 +384,22 @@ class TrackingViewer(QMainWindow):
         w, h = box[2] - box[0], box[3] - box[1]
         ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0, 0, 0, 0), lw=2))
 
+    def change_mask_level(self, sender: str = None, app_data: str = None) -> None:
+        """change mask level
+        Args:
+            sender (str): The ID of the widget that triggered this callback.
+            app_data (str): Additional data from the widget.
+        """
+        if self.based_gui == "dpg":
+            self.mask_level = app_data
+        else:
+            levels = ["large", "medium", "small"]
+            self.mask_level = levels[sender]
+
+        ic(self.mask_level)
+
     def mask_point_generation(self, ann_frame_idx, ann_obj_id, height, width, num_points=128, image=None):
-        # points = generate_uniform_grid(height=height, width=width, num_points=num_points)
-        # points, segmentation_array, anns = auto_mask_generator(
-        #     image,
-        #     self.predictor_image,
-        #     pred_iou_thresh=0.9,
-        #     points_per_side=32,
-        #     crop_n_points_downscale_factor=0.9,
-        #     stability_score_thresh=0.90,
-        #     # box_nms_thresh=0.7,
-        #     # use_m2m=True
-        # )
+        ic(self.mask_level)
 
         points, segmentation_array, anns = auto_mask_generator(
             image,
@@ -403,23 +412,8 @@ class TrackingViewer(QMainWindow):
             crop_n_points_downscale_factor=1,
             min_mask_region_area=100,
             base="sam",
-            mask_level="large"
+            mask_level=self.mask_level
         )
-
-        # points, segmentation_array, anns = auto_mask_generator(
-        #     image,
-        #     model=self.predictor_image,
-        #     points_per_side=64,
-        #     points_per_batch=128,
-        #     pred_iou_thresh=0.7,
-        #     stability_score_thresh=0.92,
-        #     stability_score_offset=0.7,
-        #     crop_n_layers=1,
-        #     box_nms_thresh=0.7,
-        #     crop_n_points_downscale_factor=2,
-        #     min_mask_region_area=25.0,
-        #     use_m2m=True,
-        # )
 
         self.show_anns(anns=anns)
 
@@ -855,31 +849,147 @@ class TrackingViewer(QMainWindow):
 
             image = cv2.imread(self.images[target_frame])
             masked_bgr = apply_mask_to_image(image, target_mask)
+            masked_rgb = apply_mask_to_image(image, target_mask, convert_to_rgb=True, is_crop=True)
             if self.is_viewer:
                 visualized_image = cv2.cvtColor(masked_bgr, cv2.COLOR_BGR2RGBA)
                 if self.based_gui == "dpg":
                     self.set_main_image(visualized_image/255)
                 else:
                     self.set_image(self.label_selected, visualized_image)
-            each_obj_infos[obj_id]["region_feature"] = get_features_from_image_and_masks(self.clip_model, image, torch.from_numpy(target_mask_torch), background=0.)
-            # self.clip_model.encode_image(torch.from_numpy(masked_bgr.astype(np.float32)).permute(2, 0, 1).to("cuda"))
+
+            with torch.no_grad():
+                tile_tensor = torch.from_numpy(masked_rgb).to(torch.float32)
+                tile_tensor = tile_tensor.permute(2, 0, 1)
+                tile_tensor = tile_tensor / 255.0
+                tiles = tile_tensor.unsqueeze(0)
+                tiles = tiles.to("cuda")
+                clip_features = self.clip_model.encode_image(tiles)
+                clip_features /= clip_features.norm(dim=-1, keepdim=True)
+                # clip_features = clip_features.detach().cpu().half()
+                clip_features = clip_features.detach().to("cpu")
+                each_obj_infos[obj_id]["region_feature"] = clip_features
+            # each_obj_infos[obj_id]["region_feature"] = get_features_from_image_and_masks(self.clip_model, image, torch.from_numpy(target_mask_torch), background=0.)
             ic(obj_id, target_frame, obj_info["max_area"], each_obj_infos[obj_id]["region_feature"])
             # region_features.append(region_feature.squeeze())
 
         region_features = [obj_info["region_feature"].squeeze() for obj_info in each_obj_infos.values()]
         ic(region_features)
 
-        # ic(region_features)
-        # ic(region_features[0].shape)
-        # ic(region_features.shape)
-
         np.save(output_path, np.array(region_features, dtype=np.float32))
 
-        for frame_id, masks in tqdm.tqdm(self.video_segments.items()):
-            output_path = f"./language_features/frame_{str(frame_id+1).zfill(5)}_f.npy"
-            np.save(output_path, np.array(region_features, dtype=np.float32))
+        if self.feature_type == "union":
+            ic("dump feature union masks")
+            for frame_id, masks in tqdm.tqdm(self.video_segments.items()):
+                output_path = f"./language_features/frame_{str(frame_id+1).zfill(5)}_f.npy"
+                np.save(output_path, np.array(region_features, dtype=np.float32))
+        else:
+            ic("dump feature each masks")
+            for frame_id, masks in tqdm.tqdm(self.video_segments.items()):
+                region_features = []
+                output_path = f"./language_features/frame_{str(frame_id+1).zfill(5)}_f.npy"
+                image = cv2.imread(self.images[frame_id])
+                for obj_id, mask in masks.items():
+                    if mask.sum() == 0:
+                        # ic("This mask is all False", frame_id, obj_id)
+                        # feature = torch.full((512,), 0, dtype=torch.float32)
+                        continue
+                    else:
+                        try:
+                            with torch.no_grad():
+                                masked_rgb = apply_mask_to_image(image, mask.squeeze(), convert_to_rgb=True, is_crop=True)
+                                tile_tensor = torch.from_numpy(masked_rgb).to(torch.float32)
+                                tile_tensor = tile_tensor.permute(2, 0, 1)
+                                tile_tensor = tile_tensor / 255.0
+                                tiles = tile_tensor.unsqueeze(0)
+                                tiles = tiles.to("cuda")
+                                clip_features = self.clip_model.encode_image(tiles)
+                                clip_features /= clip_features.norm(dim=-1, keepdim=True)
+                                clip_features = clip_features.detach().to("cpu")
+                                # clip_features = clip_features.detach().cpu().half()
+                                # feature = get_features_from_image_and_masks(self.clip_model, image, torch.from_numpy(mask), background=0.)
+                                feature = clip_features[0]
+                        except Exception as e:
+                            ic(e)
+                            ic(f"cannot get features in frame_{frame_id+1}'s obj_id: {obj_id}")
+                            self.video_segments[frame_id][obj_id] = np.zeros_like(self.video_segments[frame_id][obj_id], dtype=bool)
+                            # feature = torch.full((512,), 0, dtype=torch.float32)
+                            continue
 
+                    # ic(feature)
+                    # ic(feature.shape)
+                    feature = torch.cat((torch.tensor([obj_id], dtype=torch.float32), feature))  # 先頭にobj_idを付与
+                    region_features.append(feature)
+
+                region_features = np.array(region_features, dtype=np.float32)
+                region_features = region_features.reshape(-1, 513)
+                np.save(output_path, region_features)
+                input(">>>")
         return
+
+    def dump_text_feature_callback(self, sender: str = None, app_data: str = None) -> None:
+        """_summary_
+
+        Args:
+            sender (str, optional): _description_. Defaults to None.
+            app_data (str, optional): _description_. Defaults to None.
+        """
+        self.clip_model.eval()
+        region_features = []
+        each_obj_infos = {}
+        ic(self.ann_frame_idx)
+        ic(self.video_segments[0])
+        ic(self.video_segments[self.ann_frame_idx])
+        self.openai_utils._reset_prompt()
+
+        # for i in range(3):
+        #     choose_image = cv2.imread(random.choice(self.images))
+        #     self.openai_utils._add_image_prompt(choose_image)
+
+        # self.openai_utils._add_text_prompt("This 3d space contains the objects shown in the previous image.. When labeling the objects, give them unique characteristics that are not shared with other objects.")
+
+        # for obj_id in tqdm.tqdm(range(0, len(self.video_segments[0]))):
+        for obj_id, item in tqdm.tqdm(self.video_segments[self.ann_frame_idx].items()):
+            if obj_id not in each_obj_infos:
+                each_obj_infos[obj_id] = {"max_area": 0, "target_frame": 0, "target_mask": None, "target_mask_torch": None, "labels": None}
+
+            for frame_id, masks in self.video_segments.items():
+                try:
+                    area = torch.from_numpy(masks[obj_id]).sum().item()
+                    if area > each_obj_infos[obj_id]["max_area"]:
+                        each_obj_infos[obj_id]["max_area"] = area
+                        each_obj_infos[obj_id]["target_frame"] = frame_id
+                        each_obj_infos[obj_id]["target_mask"] = masks[obj_id].squeeze()
+                        each_obj_infos[obj_id]["target_mask_torch"] = masks[obj_id]
+                except Exception as e:
+                    ic(e)
+                    ic(f"No segmentation results about obj_id: {obj_id} in frame_{frame_id}")
+
+        ic(each_obj_infos)
+
+        for obj_id, obj_info in tqdm.tqdm(each_obj_infos.items()):
+            target_frame = obj_info["target_frame"]
+            target_mask = obj_info["target_mask"]
+            target_mask_torch = obj_info["target_mask_torch"]
+
+            image = cv2.imread(self.images[target_frame])
+            masked_bgr = apply_mask_to_image(image, target_mask)
+            if self.is_viewer:
+                visualized_image = cv2.cvtColor(masked_bgr, cv2.COLOR_BGR2RGBA)
+                if self.based_gui == "dpg":
+                    self.set_main_image(visualized_image/255)
+                else:
+                    self.set_image(self.label_selected, visualized_image)
+
+            masked_bgr = apply_mask_to_image(image, target_mask)
+            each_obj_infos[obj_id]["labels"] = self.openai_utils.make_labels(masked_bgr)
+            ic(obj_id, target_frame, obj_info["max_area"], each_obj_infos[obj_id]["labels"])
+            text_features = self.clip_model.encode_text(each_obj_infos[obj_id]["labels"])
+            text_features_numpy = text_features.detach().to("cpu").numpy()
+            labels_array = np.full((text_features_numpy.shape[0], 1), obj_id, dtype=text_features_numpy.dtype)
+            text_features_numpy = np.hstack((labels_array, text_features_numpy))
+            ic(text_features_numpy)
+            output_path = f"language_features/obj_{str(obj_id).zfill(3)}_labels.npy"
+            np.save(output_path, text_features_numpy)
 
     def visualize_instance_callback(self, sender: str = None, app_data: str = None) -> None:
         self.visualization_mode = "instance"
@@ -1038,9 +1148,19 @@ class TrackingViewer(QMainWindow):
         self.visualize_instance_button.clicked.connect(self.visualize_instance_callback)
         self.layout.addWidget(self.visualize_instance_button)
 
+        # Mask level selection
+        self.mask_level_select = QComboBox()
+        self.mask_level_select.addItems(["large", "medium", "small"])
+        self.mask_level_select.currentIndexChanged.connect(self.change_mask_level)
+        self.layout.addWidget(self.mask_level_select)
+
         self.rename_folder_button = QPushButton("Rename Folder")
         self.rename_folder_button.clicked.connect(self.rename_folder_callback)
         self.layout.addWidget(self.rename_folder_button)
+
+        self.dump_text_feature_button = QPushButton("Get labels and text features")
+        self.dump_text_feature_button.clicked.connect(self.dump_text_feature_callback)
+        self.layout.addWidget(self.dump_text_feature_button)
 
         self.auto_segmentation_all_frame_button = QPushButton("Segmentation All Frame")
         self.auto_segmentation_all_frame_button.clicked.connect(self.auto_scenario)
@@ -1087,6 +1207,8 @@ class TrackingViewer(QMainWindow):
                 dpg.add_combo(label="Choose an mask", items=self.mask_indices, callback=self.mask_select_callback, tag="mask_select")
                 dpg.add_button(label="Reset Mask", callback=self.reset_mask_callback)
 
+            dpg.add_combo(label="Mask Level", items=["large", "medium", "small"], callback=self.change_mask_level, default_value="large")
+
             # dpg.add_button(label="Add mask to target frame", callback=self.add_mask_to_blank_area)
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Dump segmentation results as GIF", callback=self.dump_video_callback)
@@ -1127,9 +1249,10 @@ class TrackingViewer(QMainWindow):
             self.segment_video_callback()
 
         # viewer.segment_whole_video()
+        viewer.dump_feature_callback()
         viewer.dump_video_callback()
         viewer.dump_mask_npy_callback()
-        viewer.dump_feature_callback()
+        viewer.dump_text_feature_callback()
 
         # thread = threading.Thread(target=auto_scenario_thread)
         # thread.start()
@@ -1147,10 +1270,11 @@ class TrackingViewer(QMainWindow):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Tracking Anything GUI")
-    parser.add_argument("--input_dir", "-i", default="/mnt/home/yuga-y/usr/splat_ws/datasets/shapenets/ShapenetSplat2_cansv1_pycolmap/renamed_images/", type=str, help="Input directory path")
+    parser.add_argument("--input_dir", "-i", default="/mnt/home/yuga-y/usr/splat_ws/datasets/shapenets/ShapeSplat2_cans_v2/renamed_images/", type=str, help="Input directory path")
     parser.add_argument("--model", "-m", default="./checkpoints/sam2.1_hiera_large.pt", type=str, help="Model checkpoint path")
     parser.add_argument("--config", "-c", default="configs/sam2.1/sam2.1_hiera_l.yaml", type=str, help="Config file path")
     parser.add_argument("--gui", "-g", default="qt", choices=["dpg", "qt"], help="GUI library")
+    parser.add_argument("--feature_type", default="each", choices=["each", "union"], help="feature mask")
     parser.add_argument("--viewer_disable", "-v", action="store_false", help="Disable viewer")
     parser.add_argument("--debug", "-d", action="store_true", help="Debug mode")
     parser.add_argument("--frame_number", "-f", action="store_false", help="output video with frame number")
@@ -1161,7 +1285,7 @@ if __name__ == "__main__":
     ic(args.viewer_disable)
     if args.viewer_disable:
         app = QApplication(sys.argv)
-    viewer = TrackingViewer(args.input_dir, args.model, args.config, args.gui, args.viewer_disable, is_debug=args.debug, keyframe_interval=args.keyframe_interval, frame_number=args.frame_number)
+    viewer = TrackingViewer(args.input_dir, args.model, args.config, args.gui, args.viewer_disable, is_debug=args.debug, keyframe_interval=args.keyframe_interval, frame_number=args.frame_number, feature_type=args.feature_type)
     if args.viewer_disable:
         viewer.show()
         sys.exit(app.exec())
