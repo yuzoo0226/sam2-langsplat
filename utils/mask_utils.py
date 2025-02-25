@@ -27,7 +27,7 @@ def make_anns_image(anns, borders=True, specific_id=None):
     return img
 
 
-def apply_mask_to_image(image, mask, convert_to_rgb=False, is_crop=False):
+def apply_mask_to_image(image, mask, convert_to_rgb=False, is_crop=False, verification_mask=False):
     """
     画像のmaskのTrueの部分のみを残し、それ以外を黒で塗りつぶす。
 
@@ -61,6 +61,18 @@ def apply_mask_to_image(image, mask, convert_to_rgb=False, is_crop=False):
 
         # 3. BBOX 領域のみをクロップ
         cropped_masked_image = masked_image[y:y+h, x:x+w]
+
+        # Check if more than 80% of the cropped region is False
+        if verification_mask:
+            cropped_mask = mask_uint8[y:y+h, x:x+w]
+            false_count = np.sum(cropped_mask == 0)
+            total_count = cropped_mask.size
+            if float(false_count) / float(total_count) > 0.8:
+                print("============")
+                print("false_count", false_count)
+                print("total_count", total_count)
+                print(float(false_count) / float(total_count))
+                return False
 
         padding = 20  # パディングのサイズ (必要に応じて変更)
         padding_cropped_masked_image = cv2.copyMakeBorder(
@@ -287,6 +299,20 @@ def visualize_instance(masks: dict) -> np.ndarray:
     for label, color in label_colors.items():
         output_image[output_array == label] = color
 
+    # Convert to RGBA
     output_image = cv2.cvtColor(output_image, cv2.COLOR_BGR2RGBA)
+
+    # Draw the label number at the center of each region
+    for label, mask in masks.items():
+        # Find contours of the mask
+        contours, _ = cv2.findContours(mask[0].astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in contours:
+            # Calculate the centroid of the contour
+            M = cv2.moments(contour)
+            if M["m00"] != 0:
+                cx = int(M["m10"] / M["m00"])
+                cy = int(M["m01"] / M["m00"])
+                # Draw the label number at the centroid
+                cv2.putText(output_image, str(label), (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255, 255), 1, cv2.LINE_AA)
 
     return output_image
