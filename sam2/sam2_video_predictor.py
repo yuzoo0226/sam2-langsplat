@@ -21,15 +21,16 @@ class SAM2VideoPredictor(SAM2Base):
 
     def __init__(
         self,
-        fill_hole_area=0,
+        fill_hole_area=1,
         # whether to apply non-overlapping constraints on the output object masks
-        non_overlap_masks=False,
+        non_overlap_masks=True,
+        # non_overlap_masks=False,
         # whether to clear non-conditioning memory of the surrounding frames (which may contain outdated information) after adding correction clicks;
         # note that this would only apply to *single-object tracking* unless `clear_non_cond_mem_for_multi_obj` is also set to True)
         clear_non_cond_mem_around_input=False,
         # if `add_all_frames_to_correct_as_cond` is True, we also append to the conditioning frame list any frame that receives a later correction click
         # if `add_all_frames_to_correct_as_cond` is False, we conditioning frame list to only use those initial conditioning frames
-        add_all_frames_to_correct_as_cond=False,
+        add_all_frames_to_correct_as_cond=True,
         **kwargs,
     ):
         super().__init__(**kwargs)

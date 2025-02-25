@@ -54,7 +54,7 @@ class OpenCLIPNetwork(nn.Module):
         self.model = model.to("cuda")
         self.clip_n_dims = self.config.clip_n_dims
 
-        self.positives = self.config.positives    
+        self.positives = self.config.positives
         self.negatives = self.config.negatives
         with torch.no_grad():
             tok_phrases = torch.cat([self.tokenizer(phrase) for phrase in self.positives]).to("cuda")

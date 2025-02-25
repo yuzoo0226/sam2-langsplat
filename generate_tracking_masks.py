@@ -33,10 +33,40 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtGui import QPixmap, QImage
 from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, pyqtSignal, QPointF
+
+# try:
+#     from cutie.inference.inference_core import InferenceCore
+#     from cutie.utils.get_default_model import get_default_model
+#     use_cuite = True
+# except Exception as e:
+#     print("git clone https://github.com/yuzoo0226/Cutie.git")
+#     print("cd Cuite && pip install .")
 
 
-# class TrackingViewer(QMainWindow):
-class TrackingViewer():
+class ClickableLabel(QLabel):
+    clicked = pyqtSignal(QPointF)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setScaledContents(True)
+
+    # QLabel 内でクリックを検知
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton:
+            x, y = event.position().x(), event.position().y()
+            print(f"right クリックされた座標: ({x}, {y})")
+
+            pos = event.position()
+            self.clicked.emit(pos)
+
+        if event.button() == Qt.MouseButton.LeftButton:
+            x, y = event.position().x(), event.position().y()
+            # print(f"left クリックされた座標: ({x}, {y})")
+
+
+class TrackingViewer(QMainWindow):
+# class TrackingViewer():
     def __init__(self, image_dir: str, sam_checkpoint: str, sam_config: str, based_gui="dpg", is_viewer=True, is_debug=True, keyframe_interval: int = 0, frame_number: bool = False, feature_type="each") -> None:
         """A GUI application for viewing sorted images with navigation support."""
         super().__init__()
@@ -62,6 +92,9 @@ class TrackingViewer():
         self.ann_frame_idx = 0
         self.keyframe_interval: int = keyframe_interval
         self.video_segments = {}  # video_segments contains the per-frame segmentation results
+
+        # self.cuite = get_default_model()
+        # self.cuite_processor = InferenceCore(self.cutie, cfg=self.cutie.cfg)
 
         self.checkpoint = "./checkpoints/sam2.1_hiera_large.pt"
         self.model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
@@ -405,12 +438,12 @@ class TrackingViewer():
             image,
             model=self.sam_model,
             points_per_side=32,
-            pred_iou_thresh=0.85,
-            box_nms_thresh=0.85,
-            stability_score_thresh=0.85,
+            pred_iou_thresh=0.87,
+            box_nms_thresh=0.87,
+            stability_score_thresh=0.87,
             crop_n_layers=1,
             crop_n_points_downscale_factor=1,
-            min_mask_region_area=100,
+            min_mask_region_area=2000,
             base="sam",
             mask_level=self.mask_level
         )
@@ -774,7 +807,6 @@ class TrackingViewer():
         output_path = "./language_features/output_instance_visualizer.mp4"
         video_writer_instance = cv2.VideoWriter(output_path, fourcc, 1, (width*2, height))
         for idx in range(len(self.frame_names)):
-            ic(idx)
             image_visualize_instance = visualize_instance(self.video_segments[idx])
             # try:
             image_visualize_instance = cv2.cvtColor(image_visualize_instance, cv2.COLOR_RGBA2BGR)
@@ -849,7 +881,7 @@ class TrackingViewer():
 
             image = cv2.imread(self.images[target_frame])
             masked_bgr = apply_mask_to_image(image, target_mask)
-            masked_rgb = apply_mask_to_image(image, target_mask, convert_to_rgb=True, is_crop=True)
+            masked_rgb = apply_mask_to_image(image, target_mask, convert_to_rgb=True, is_crop=True, verification_mask=False)
             if self.is_viewer:
                 visualized_image = cv2.cvtColor(masked_bgr, cv2.COLOR_BGR2RGBA)
                 if self.based_gui == "dpg":
@@ -896,7 +928,10 @@ class TrackingViewer():
                     else:
                         try:
                             with torch.no_grad():
-                                masked_rgb = apply_mask_to_image(image, mask.squeeze(), convert_to_rgb=True, is_crop=True)
+                                masked_rgb = apply_mask_to_image(image, mask.squeeze(), convert_to_rgb=True, is_crop=True, verification_mask=True)
+                                if masked_rgb is False:
+                                    ic("Unavailable mask detected in", frame_id+1, obj_id)
+
                                 tile_tensor = torch.from_numpy(masked_rgb).to(torch.float32)
                                 tile_tensor = tile_tensor.permute(2, 0, 1)
                                 tile_tensor = tile_tensor / 255.0
@@ -923,7 +958,6 @@ class TrackingViewer():
                 region_features = np.array(region_features, dtype=np.float32)
                 region_features = region_features.reshape(-1, 513)
                 np.save(output_path, region_features)
-                input(">>>")
         return
 
     def dump_text_feature_callback(self, sender: str = None, app_data: str = None) -> None:
@@ -992,10 +1026,86 @@ class TrackingViewer():
             np.save(output_path, text_features_numpy)
 
     def visualize_instance_callback(self, sender: str = None, app_data: str = None) -> None:
-        self.visualization_mode = "instance"
+        if self.visualization_mode == "mask":
+            self.visualization_mode = "instance"
+        else:
+            self.visualization_mode = "mask"
+
         self.update_images(self.target_frame_idx, self.target_frame_idx)
         # target_image = visualize_instance(self.video_segments[self.target_frame_idx])
         # self.set_image(self.label_selected, target_image)
+
+    # 入力されたテキストを QLabel に表示
+    def update_keyframe_interval(self, text):
+        try:
+            self.keyframe_interval = int(text)
+            print(self.keyframe_interval)
+        except Exception as e:
+            return
+
+    # ClickableLabel からのクリックイベントを処理
+    def add_obj_prompt_click(self, pos: QPointF):
+        x, y = pos.x(), pos.y()
+        print(f"MainWindow で受け取ったクリック座標: ({x}, {y})")
+        image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.ann_frame_idx]))
+        obj_id = input("obj_id >>")
+        try:
+            obj_id = int(obj_id)
+        except Exception as e:
+            ic(e)
+            ic("Invalid obj_id is provided, only integer value is acceptable.")
+            return
+
+        points = np.array([[int(x), int(y)]], dtype=np.float32)
+        labels = np.array([1], np.int32)
+
+        print(obj_id)
+        print(type(obj_id))
+
+        _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_points_or_box(
+            inference_state=self.inference_state,
+            frame_idx=self.ann_frame_idx,
+            obj_id=obj_id,
+            points=points,
+            labels=labels,
+            clear_old_points=False
+        )
+
+        for idx, mask in enumerate(out_mask_logits):
+            try:
+                image = draw_points_on_image(image, points=points)
+                mask = (mask > 0.0).cpu().numpy()
+                display_image = apply_mask_to_rgba_image(image, mask)
+                if idx+1 == obj_id:
+                    if self.based_gui == "dpg":
+                        display_image = cv2.cvtColor(display_image, cv2.COLOR_RGB2RGBA)
+                        self.set_main_image(display_image/255)
+                    else:
+                        display_image = cv2.cvtColor(display_image, cv2.COLOR_RGB2BGRA)
+                        self.set_image(self.label_selected, display_image)
+
+                    # check_str = input(f"add this mask as obj_id {obj_id} [Y/n] >>>")
+                    if True:
+                        mask = torch.from_numpy(mask)
+
+                        _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_mask(
+                            inference_state=self.inference_state,
+                            frame_idx=self.ann_frame_idx,
+                            obj_id=obj_id,
+                            mask=mask.squeeze(0)
+                        )
+                        ic(f"[Add mask] append mask in frame_{self.ann_frame_idx}.jpg as obj_id: {obj_id}")
+                    else:
+                        ic("[Skip]")
+            except Exception as e:
+                ic(e)
+                ic("cannot detect target mask")
+
+    def delete_obj_id_callback(self, sender: str = None, app_data: str = None) -> None:
+        """_summary_
+        """
+        obj_id = input("obj_id >>> ")
+        self.predictor_video.remove_object(self.inference_state, obj_id)
 
     def segment_whole_video(self) -> None:
         """Segment the whole video."""
@@ -1030,11 +1140,65 @@ class TrackingViewer():
                 ic(self.ann_frame_idx)
                 ic(self.keyframe_interval)
                 ic(self.ann_frame_idx-self.keyframe_interval)
+                # for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state, start_frame_idx=max(0, self.ann_frame_idx-self.keyframe_interval), max_frame_num_to_track=((self.keyframe_interval*3)+1), reverse=True):
                 for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state, start_frame_idx=max(0, self.ann_frame_idx-self.keyframe_interval), max_frame_num_to_track=((self.keyframe_interval*3)+1)):
                     self.video_segments[out_frame_idx] = {
                         out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy() for i, out_obj_id in enumerate(out_obj_ids)
                     }
             else:
+                # for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state, reverse=True):
+                for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state):
+                    self.video_segments[out_frame_idx] = {
+                        out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy() for i, out_obj_id in enumerate(out_obj_ids)
+                    }
+
+            for out_frame_idx, (_, segments) in enumerate(self.video_segments.items()):
+                # if out_frame_idx == len(self.frame_names)-1:
+                output_filename = self.frame_names[out_frame_idx]
+                image = cv2.imread(os.path.join(self.image_dir, self.frame_names[out_frame_idx]))
+                for obj_idx, segment in segments.items():
+                    _ = self.mask_to_numpy(segment, image, filename=output_filename, anns_obj_id=obj_idx)
+
+            if self.is_viewer:
+                self.mask_indices = []
+                self.mask_indices = [0] + out_obj_ids + [999]
+                # dpg.configure_item("mask_select", items=self.mask_indices)
+                self.mask_select.clear()
+                self.mask_select.addItems([str(i) for i in self.mask_indices])
+                self.mask_select.currentIndexChanged.connect(self.mask_select_callback)
+
+                self.target_mask_idx = 0
+                self.mask_select_callback(self.target_mask_idx)
+
+    def segment_video_callback_wo_mask(self, sender: str = None, app_data: str = None) -> None:
+        """Segment for Selected video (without adding mask)
+
+        Args:
+            sender (str): The ID of the widget that triggered this callback.
+            app_data (str): Additional data from the widget.
+        """
+        image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.ann_frame_idx]))
+        # out_obj_ids, out_mask_logits = self.mask_point_generation(self.ann_frame_idx, self.ann_obj_id, height=self.main_image_height, width=self.main_image_width, num_points=16*16, image=image)
+
+        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
+            image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.ann_frame_idx]))
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+            # out_obj_ids, out_mask_logits = self.mask_point_generation(self.ann_frame_idx, self.ann_obj_id, height=h, width=w, num_points=16*16, image=image_float)
+            # self.ann_obj_id = out_obj_ids[-1]
+
+            if self.keyframe_interval > 0:
+                ic(f"start frame idx: {max(0, self.ann_frame_idx-self.keyframe_interval)}")
+                ic(self.ann_frame_idx)
+                ic(self.keyframe_interval)
+                ic(self.ann_frame_idx-self.keyframe_interval)
+                # for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state, start_frame_idx=max(0, self.ann_frame_idx-self.keyframe_interval), max_frame_num_to_track=((self.keyframe_interval*3)+1), reverse=True):
+                for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state, start_frame_idx=max(0, self.ann_frame_idx-self.keyframe_interval), max_frame_num_to_track=((self.keyframe_interval*3)+1)):
+                    self.video_segments[out_frame_idx] = {
+                        out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy() for i, out_obj_id in enumerate(out_obj_ids)
+                    }
+            else:
+                # for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state, reverse=True):
                 for out_frame_idx, out_obj_ids, out_mask_logits in self.predictor_video.propagate_in_video(self.inference_state):
                     self.video_segments[out_frame_idx] = {
                         out_obj_id: (out_mask_logits[i] > 0.0).cpu().numpy() for i, out_obj_id in enumerate(out_obj_ids)
@@ -1073,7 +1237,8 @@ class TrackingViewer():
         self.blank_main_image = np.full((self.main_image_height, self.main_image_width, 4), 100, dtype=np.uint8)
         self.blank_sub_image = np.full((self.sub_image_height, self.sub_image_width, 4), 30, dtype=np.uint8)
 
-        self.label_selected = QLabel(self)
+        self.label_selected = ClickableLabel(self)
+        self.label_selected.clicked.connect(self.add_obj_prompt_click)
         self.label_before1 = QLabel(self)
         self.label_before2 = QLabel(self)
         self.label_next1 = QLabel(self)
@@ -1109,17 +1274,24 @@ class TrackingViewer():
         self.slider_value_display.setText("0")
         self.slider_value_display.returnPressed.connect(lambda: self.update_images(int(self.slider_value_display.text())))
         slider_layout.addWidget(self.slider_value_display)
-
         self.layout.addLayout(slider_layout)
+
+        # セグメントボタン
+        segment_layout = QHBoxLayout()
+
+        self.segment_button = QPushButton("Segment Video")
+        self.segment_button.clicked.connect(self.segment_video_callback)
+        segment_layout.addWidget(self.segment_button)
+
+        self.only_segment_button = QPushButton("Segment Video (without adding mask)")
+        self.only_segment_button.clicked.connect(self.segment_video_callback_wo_mask)
+        segment_layout.addWidget(self.only_segment_button)
+
+        self.layout.addLayout(segment_layout)
 
         # 動画パス入力
         self.video_path = QLineEdit("/mnt/home/yuga-y/usr/splat_ws/third_party/SegAnyGAussians/models/vae_v6.pt")
         self.layout.addWidget(self.video_path)
-
-        # セグメントボタン
-        self.segment_button = QPushButton("Segment Video")
-        self.segment_button.clicked.connect(self.segment_video_callback)
-        self.layout.addWidget(self.segment_button)
 
         # キーフレーム間隔入力
         # self.keyframe_interval = QLineEdit("0")
@@ -1134,19 +1306,24 @@ class TrackingViewer():
         self.layout.addWidget(self.reset_mask_button)
         self.reset_mask_button.clicked.connect(self.reset_mask_callback)
 
-        # 出力ボタン
-        self.dump_gif_button = QPushButton("Dump segmentation results as GIF")
-        self.dump_gif_button.clicked.connect(self.dump_video_callback) 
-        self.layout.addWidget(self.dump_gif_button)
-        self.dump_npy_button = QPushButton("Dump segmentation results as NPY")
-        self.dump_npy_button.clicked.connect(self.dump_mask_npy_callback)
-        self.layout.addWidget(self.dump_npy_button)
-        self.dump_feature_button = QPushButton("Dump feature")
-        self.dump_feature_button.clicked.connect(self.dump_feature_callback)
-        self.layout.addWidget(self.dump_feature_button)
         self.visualize_instance_button = QPushButton("Visualize instance as Color")
         self.visualize_instance_button.clicked.connect(self.visualize_instance_callback)
         self.layout.addWidget(self.visualize_instance_button)
+
+        # 出力ボタン
+        self.dump_gif_button = QPushButton("Dump segmentation results as GIF")
+        self.dump_gif_button.clicked.connect(self.dump_video_callback)
+        self.dump_npy_button = QPushButton("Dump segmentation results as NPY")
+        self.dump_npy_button.clicked.connect(self.dump_mask_npy_callback)
+        self.dump_feature_button = QPushButton("Dump feature")
+        self.dump_feature_button.clicked.connect(self.dump_feature_callback)
+
+        dump_layout = QHBoxLayout()
+        dump_layout.addWidget(self.dump_feature_button)
+        dump_layout.addWidget(self.dump_npy_button)
+        dump_layout.addWidget(self.dump_gif_button)
+        self.layout.addLayout(dump_layout)
+        # self.layout.addWidget(self.dump_feature_button)
 
         # Mask level selection
         self.mask_level_select = QComboBox()
@@ -1157,6 +1334,16 @@ class TrackingViewer():
         self.rename_folder_button = QPushButton("Rename Folder")
         self.rename_folder_button.clicked.connect(self.rename_folder_callback)
         self.layout.addWidget(self.rename_folder_button)
+
+        self.delete_obj_id_button = QPushButton("Delete Obj by ID")
+        self.delete_obj_id_button.clicked.connect(self.delete_obj_id_callback)
+        self.layout.addWidget(self.delete_obj_id_button)
+
+        # QLineEdit: テキスト入力ボックス
+        self.keyframe_interval_input = QLineEdit(self)
+        self.keyframe_interval_input.setPlaceholderText("set keyframe_interval")
+        self.layout.addWidget(self.keyframe_interval_input)
+        self.keyframe_interval_input.textChanged.connect(self.update_keyframe_interval)
 
         self.dump_text_feature_button = QPushButton("Get labels and text features")
         self.dump_text_feature_button.clicked.connect(self.dump_text_feature_callback)
@@ -1243,7 +1430,7 @@ class TrackingViewer():
 
         interval = self.keyframe_interval
 
-        for idx in range(1, len(self.images), interval):
+        for idx in range(17, len(self.images), interval):
             ic(f"target_frame is {idx}")
             self.change_target_frame_idx(idx)
             self.segment_video_callback()
@@ -1252,7 +1439,7 @@ class TrackingViewer():
         viewer.dump_feature_callback()
         viewer.dump_video_callback()
         viewer.dump_mask_npy_callback()
-        viewer.dump_text_feature_callback()
+        # viewer.dump_text_feature_callback()
 
         # thread = threading.Thread(target=auto_scenario_thread)
         # thread.start()
@@ -1278,7 +1465,7 @@ if __name__ == "__main__":
     parser.add_argument("--viewer_disable", "-v", action="store_false", help="Disable viewer")
     parser.add_argument("--debug", "-d", action="store_true", help="Debug mode")
     parser.add_argument("--frame_number", "-f", action="store_false", help="output video with frame number")
-    parser.add_argument("--keyframe_interval", "-k", default=10, type=int, help="Keyframe interval")
+    parser.add_argument("--keyframe_interval", "-k", default=20, type=int, help="Keyframe interval")
     args = parser.parse_args()
 
     ic(args.gui)
