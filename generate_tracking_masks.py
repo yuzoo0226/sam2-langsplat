@@ -55,14 +55,14 @@ class ClickableLabel(QLabel):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.RightButton:
             x, y = event.position().x(), event.position().y()
-            print(f"right クリックされた座標: ({x}, {y})")
+            print(f"right Clicked point: ({x}, {y})")
 
             pos = event.position()
             self.clicked.emit(pos)
 
         if event.button() == Qt.MouseButton.LeftButton:
             x, y = event.position().x(), event.position().y()
-            # print(f"left クリックされた座標: ({x}, {y})")
+            print(f"left Clicked point: ({x}, {y})")
 
 
 class TrackingViewer(QMainWindow):
@@ -774,7 +774,7 @@ class TrackingViewer(QMainWindow):
             ic("Please Install imageio with following commands, ``pip install imageio''")
             return False
 
-        for obj_id in tqdm.tqdm(range(1, len(self.video_segments[self.ann_frame_idx]))):
+        for obj_id in tqdm.tqdm(range(1, len(self.video_segments[self.ann_frame_idx])+1)):
             output_path = f"./language_features/output_obj_{str(obj_id).zfill(3)}.gif"
             gif_data = []
             mp4_data = []
@@ -1224,7 +1224,7 @@ class TrackingViewer(QMainWindow):
 
     def initUI(self):
         self.setWindowTitle("Tracking Anything Editor")
-        self.setGeometry(100, 100, 1550, 1200)
+        self.setGeometry(100, 100, 400, 400)
 
         # メインウィジェット
         self.central_widget = QWidget()
@@ -1358,7 +1358,7 @@ class TrackingViewer(QMainWindow):
     def _setup_gui(self) -> None:
         """Setup the Dear PyGUI layout."""
         dpg.create_context()
-        dpg.create_viewport(title='Tracking Anything Editor', width=1550, height=1200)
+        dpg.create_viewport(title='Tracking Anything Editor', width=1900, height=1500)
 
         self.blank_main_image = np.full((self.main_image_height, self.main_image_width, 4), 100, dtype=np.uint8)
         self.blank_sub_image = np.full((self.sub_image_height, self.sub_image_width, 4), 30, dtype=np.uint8)
@@ -1457,7 +1457,7 @@ class TrackingViewer(QMainWindow):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Tracking Anything GUI")
-    parser.add_argument("--input_dir", "-i", default="/mnt/home/yuga-y/usr/splat_ws/datasets/shapenets/ShapeSplat2_cans_v2/renamed_images/", type=str, help="Input directory path")
+    parser.add_argument("--input_dir", "-i", default="~/usr/splat_ws/datasets/lerf_ovs/teatime/renamed_images", type=str, help="Input directory path")
     parser.add_argument("--model", "-m", default="./checkpoints/sam2.1_hiera_large.pt", type=str, help="Model checkpoint path")
     parser.add_argument("--config", "-c", default="configs/sam2.1/sam2.1_hiera_l.yaml", type=str, help="Config file path")
     parser.add_argument("--gui", "-g", default="qt", choices=["dpg", "qt"], help="GUI library")

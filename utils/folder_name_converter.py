@@ -22,8 +22,8 @@ def convert_and_save_images(src_folder, extension, dest_folder):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert and save images to a new folder.")
-    parser.add_argument("--folder", type=str, default="/mnt/home/yuga-y/usr/splat_ws/datasets/shapenets/ShapeSplat2_cans_v2/images", help="Source folder containing the images.")
-    parser.add_argument("--extension", type=str, default=".png", help="Extension of the files to be converted.")
+    parser.add_argument("--folder", type=str, default="/mnt/home/yuga-y/usr/splat_ws/datasets/lerf_ovs/teatime/images", help="Source folder containing the images.")
+    parser.add_argument("--extension", type=str, default=".jpg", help="Extension of the files to be converted.")
     args = parser.parse_args()
 
     src_folder = args.folder
