@@ -72,6 +72,7 @@ class TrackingViewer(QMainWindow):
         super().__init__()
         self.image_dir = image_dir
         self.video_path = None
+        self.tracking_type = args.tracking_type
         self.images = self._load_images(ext="jpg")
         h, w = cv2.imread(self.images[0], 0).shape
         # self.main_image_size = max(h, w)
@@ -96,11 +97,23 @@ class TrackingViewer(QMainWindow):
         # self.cuite = get_default_model()
         # self.cuite_processor = InferenceCore(self.cutie, cfg=self.cutie.cfg)
 
-        self.checkpoint = "./checkpoints/sam2.1_hiera_large.pt"
-        self.model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
-        self.sam_ckpt_path = "./checkpoints/sam_vit_h_4b8939.pth"
-        self.predictor_video = build_sam2_video_predictor(self.model_cfg, self.checkpoint)
-        # self.predictor_image = build_sam2(self.model_cfg, self.checkpoint)
+        if self.tracking_type == "sam2":
+            self.checkpoint = "./checkpoints/sam2.1_hiera_large.pt"
+            self.model_cfg = "configs/sam2.1/sam2.1_hiera_l.yaml"
+            self.sam_ckpt_path = "./checkpoints/sam_vit_h_4b8939.pth"
+            self.predictor_video = build_sam2_video_predictor(self.model_cfg, self.checkpoint)
+            # self.predictor_image = build_sam2(self.model_cfg, self.checkpoint)
+        else:  # samurai
+            model_name = "base_plus"
+            exp_name = "samurai"
+            self.checkpoint = f"sam2/checkpoints/sam2.1_hiera_{model_name}.pt"
+            if model_name == "base_plus":
+                self.model_cfg = "configs/samurai/sam2.1_hiera_b+.yaml"
+            else:
+                self.model_cfg = f"configs/samurai/sam2.1_hiera_{model_name[0]}.yaml"
+            self.sam_ckpt_path = "./checkpoints/sam_vit_h_4b8939.pth"
+            self.predictor_video = build_sam2_video_predictor(self.model_cfg, self.checkpoint)
+
         self.sam_model = sam_model_registry["vit_h"](checkpoint=self.sam_ckpt_path).to('cuda')
         self.clip_model = OpenCLIPNetwork(OpenCLIPNetworkConfig)
 
@@ -120,6 +133,8 @@ class TrackingViewer(QMainWindow):
         self.mask_level = "large"
         self.feature_type = feature_type
         self.openai_utils = OpenAIUtils()
+        self.all_mask_infos = {}
+        self.mask_info_idx = 0
 
         if is_viewer:
             if based_gui == "dpg":
@@ -218,6 +233,10 @@ class TrackingViewer(QMainWindow):
             output_path = os.path.join(output_dir, filename)
             print(output_path)
             cv2.imwrite(output_path, frame)
+
+    def _reset_all_mask_infos(self):
+        self.all_mask_infos = {}
+        self.mask_info_idx = 0
 
     def resize_sub_image(self, image):
         h, w = image.shape[:2]
@@ -456,43 +475,83 @@ class TrackingViewer(QMainWindow):
         for idx in removed_indices:
             np.delete(segmentation_array, idx)
 
+        if self.video_segments == {}:
+            for idx, (point, segment, ann) in enumerate(
+                zip(points, segmentation_array, anns)
+            ):
+                print("append mask")
+                self.all_mask_infos[self.mask_info_idx] = {
+                    "frame_idx": ann_frame_idx,
+                    "point": point,
+                    "target_mask": segment,
+                    "ann": ann,
+                    "obj_id": idx+1
+                }
+                self.mask_info_idx += 1
+
         if self.video_segments != {}:
             # masks = self.video_segments[self.ann_frame_idx].values()
             keys = self.video_segments[self.ann_frame_idx].keys()
-            ic(keys)
             combined_mask = combined_all_mask(self.video_segments[self.ann_frame_idx])
 
-            for idx, target_mask in enumerate(segmentation_array):
-                same_mask_idx = has_same_mask(target_mask, self.video_segments[self.ann_frame_idx])
+            for idx, (point, segment, ann) in enumerate(zip(points, segmentation_array, anns)):
+                same_mask_idx = has_same_mask(segment, self.video_segments[self.ann_frame_idx])
                 if same_mask_idx > 0:
                     removed_indices.append(idx)
 
                     ic(f"[Add mask] append mask {idx} in frame_{self.ann_frame_idx}.jpg as obj_id: {same_mask_idx}")
-                    _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_mask(
-                        inference_state=self.inference_state,
-                        frame_idx=ann_frame_idx,
-                        obj_id=same_mask_idx,
-                        mask=target_mask
-                    )
 
-                overlap_ratio = calculate_overlap_ratio(combined_mask, target_mask)
+                    self.all_mask_infos[self.mask_info_idx] = {
+                        "frame_idx": ann_frame_idx,
+                        "point": point,
+                        "target_mask": segment,
+                        "ann": ann,
+                        "obj_id": same_mask_idx
+                    }
+                    self.mask_info_idx += 1
+                    # _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_mask(
+                    #     inference_state=self.inference_state,
+                    #     frame_idx=ann_frame_idx,
+                    #     obj_id=same_mask_idx,
+                    #     mask=target_mask
+                    # )
+
+                overlap_ratio = calculate_overlap_ratio(combined_mask, segment)
                 # ic(idx, overlap_ratio)
                 if overlap_ratio > 0.9:
                     removed_indices.append(idx)
 
-        append_obj_id = 1
-        for idx, mask in enumerate(segmentation_array):
-            if idx in removed_indices:
-                continue
+            append_obj_id = 1
+            for idx, (point, segment, ann) in enumerate(zip(points, segmentation_array, anns)):
+                if idx in removed_indices:
+                    continue
 
-            ic(f"[New obj] append mask {idx} in frame_{self.ann_frame_idx}.jpg as obj_id: {ann_obj_id+append_obj_id}")
+                ic(f"[New obj] append mask {idx} in frame_{self.ann_frame_idx}.jpg as obj_id: {ann_obj_id+append_obj_id}")
+                # _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_mask(
+                #     inference_state=self.inference_state,
+                #     frame_idx=ann_frame_idx,
+                #     obj_id=ann_obj_id+append_obj_id,
+                #     mask=mask
+                # )
+                self.all_mask_infos[self.mask_info_idx] = {
+                    "frame_idx": ann_frame_idx,
+                    "point": point,
+                    "target_mask": segment,
+                    "ann": ann,
+                    "obj_id": ann_obj_id+append_obj_id
+                }
+                self.mask_info_idx += 1
+                append_obj_id += 1
+
+        self.predictor_video.reset_state(self.inference_state)
+        for mask_info in self.all_mask_infos.values():
+            print(mask_info)
             _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_mask(
                 inference_state=self.inference_state,
-                frame_idx=ann_frame_idx,
-                obj_id=ann_obj_id+append_obj_id,
-                mask=mask
+                frame_idx=mask_info["frame_idx"],
+                obj_id=mask_info["obj_id"],
+                mask=mask_info["target_mask"]
             )
-            append_obj_id += 1
 
         if image is not None and self.is_viewer and self.is_debug:
             for mask in out_mask_logits:
@@ -1457,11 +1516,12 @@ class TrackingViewer(QMainWindow):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Tracking Anything GUI")
-    parser.add_argument("--input_dir", "-i", default="~/usr/splat_ws/datasets/lerf_ovs/teatime/renamed_images", type=str, help="Input directory path")
+    parser.add_argument("--input_dir", "-i", default="/mnt/home/yuga-y/usr/splat_ws/datasets/lerf_ovs/teatime/renamed_images", type=str, help="Input directory path")
     parser.add_argument("--model", "-m", default="./checkpoints/sam2.1_hiera_large.pt", type=str, help="Model checkpoint path")
     parser.add_argument("--config", "-c", default="configs/sam2.1/sam2.1_hiera_l.yaml", type=str, help="Config file path")
     parser.add_argument("--gui", "-g", default="qt", choices=["dpg", "qt"], help="GUI library")
     parser.add_argument("--feature_type", default="each", choices=["each", "union"], help="feature mask")
+    parser.add_argument("--tracking_type", "-t", choices=["sam2", "samurai"], default="samurai", type=str)
     parser.add_argument("--viewer_disable", "-v", action="store_false", help="Disable viewer")
     parser.add_argument("--debug", "-d", action="store_true", help="Debug mode")
     parser.add_argument("--frame_number", "-f", action="store_false", help="output video with frame number")
