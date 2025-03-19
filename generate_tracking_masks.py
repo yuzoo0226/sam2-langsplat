@@ -65,8 +65,8 @@ class ClickableLabel(QLabel):
             print(f"left Clicked point: ({x}, {y})")
 
 
-class TrackingViewer(QMainWindow):
-# class TrackingViewer():
+# class TrackingViewer(QMainWindow):
+class TrackingViewer():
     def __init__(self, image_dir: str, sam_checkpoint: str, sam_config: str, based_gui="dpg", is_viewer=True, is_debug=True, keyframe_interval: int = 0, frame_number: bool = False, feature_type="each") -> None:
         """A GUI application for viewing sorted images with navigation support."""
         super().__init__()
@@ -104,7 +104,8 @@ class TrackingViewer(QMainWindow):
             self.predictor_video = build_sam2_video_predictor(self.model_cfg, self.checkpoint)
             # self.predictor_image = build_sam2(self.model_cfg, self.checkpoint)
         else:  # samurai
-            model_name = "base_plus"
+            # model_name = "base_plus"
+            model_name = "large"
             exp_name = "samurai"
             self.checkpoint = f"sam2/checkpoints/sam2.1_hiera_{model_name}.pt"
             if model_name == "base_plus":
@@ -450,6 +451,31 @@ class TrackingViewer(QMainWindow):
 
         ic(self.mask_level)
 
+    def _initialize_mask_infos(self):
+        self.predictor_video.reset_state(self.inference_state)
+        try:
+            for mask_info in self.all_mask_infos.values():
+                if mask_info["target_mask"] is not None:
+                    _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_mask(
+                        inference_state=self.inference_state,
+                        frame_idx=mask_info["frame_idx"],
+                        obj_id=mask_info["obj_id"],
+                        mask=mask_info["target_mask"]
+                    )
+                else:
+                    _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_points_or_box(
+                        inference_state=self.inference_state,
+                        frame_idx=mask_info["frame_idx"],
+                        obj_id=mask_info["obj_id"],
+                        points=mask_info["point"],
+                        labels=mask_info["labels"],
+                        clear_old_points=False
+                    )
+            return _, out_obj_ids, out_mask_logits
+        except Exception as e:
+            print(e)
+            return False
+
     def mask_point_generation(self, ann_frame_idx, ann_obj_id, height, width, num_points=128, image=None):
         ic(self.mask_level)
 
@@ -543,15 +569,25 @@ class TrackingViewer(QMainWindow):
                 self.mask_info_idx += 1
                 append_obj_id += 1
 
-        self.predictor_video.reset_state(self.inference_state)
-        for mask_info in self.all_mask_infos.values():
-            print(mask_info)
-            _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_mask(
-                inference_state=self.inference_state,
-                frame_idx=mask_info["frame_idx"],
-                obj_id=mask_info["obj_id"],
-                mask=mask_info["target_mask"]
-            )
+        _, out_obj_ids, out_mask_logits = self._initialize_mask_infos()
+        # self.predictor_video.reset_state(self.inference_state)
+        # for mask_info in self.all_mask_infos.values():
+        #     if mask_info["target_mask"] is not None:
+        #         _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_mask(
+        #             inference_state=self.inference_state,
+        #             frame_idx=mask_info["frame_idx"],
+        #             obj_id=mask_info["obj_id"],
+        #             mask=mask_info["target_mask"]
+        #         )
+        #     else:
+        #         _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_points_or_box(
+        #             inference_state=self.inference_state,
+        #             frame_idx=mask_info["frame_idx"],
+        #             obj_id=mask_info["obj_id"],
+        #             points=mask_info["point"],
+        #             labels=mask_info["labels"],
+        #             clear_old_points=False
+        #         )
 
         if image is not None and self.is_viewer and self.is_debug:
             for mask in out_mask_logits:
@@ -1121,44 +1157,57 @@ class TrackingViewer(QMainWindow):
         print(obj_id)
         print(type(obj_id))
 
-        _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_points_or_box(
-            inference_state=self.inference_state,
-            frame_idx=self.ann_frame_idx,
-            obj_id=obj_id,
-            points=points,
-            labels=labels,
-            clear_old_points=False
-        )
+        try:  # sam2
+            _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_points_or_box(
+                inference_state=self.inference_state,
+                frame_idx=self.ann_frame_idx,
+                obj_id=obj_id,
+                points=points,
+                labels=labels,
+                clear_old_points=False
+            )
 
-        for idx, mask in enumerate(out_mask_logits):
-            try:
-                image = draw_points_on_image(image, points=points)
-                mask = (mask > 0.0).cpu().numpy()
-                display_image = apply_mask_to_rgba_image(image, mask)
-                if idx+1 == obj_id:
-                    if self.based_gui == "dpg":
-                        display_image = cv2.cvtColor(display_image, cv2.COLOR_RGB2RGBA)
-                        self.set_main_image(display_image/255)
-                    else:
-                        display_image = cv2.cvtColor(display_image, cv2.COLOR_RGB2BGRA)
-                        self.set_image(self.label_selected, display_image)
+            for idx, mask in enumerate(out_mask_logits):
+                try:
+                    image = draw_points_on_image(image, points=points)
+                    mask = (mask > 0.0).cpu().numpy()
+                    display_image = apply_mask_to_rgba_image(image, mask)
+                    if idx+1 == obj_id:
+                        if self.based_gui == "dpg":
+                            display_image = cv2.cvtColor(display_image, cv2.COLOR_RGB2RGBA)
+                            self.set_main_image(display_image/255)
+                        else:
+                            display_image = cv2.cvtColor(display_image, cv2.COLOR_RGB2BGRA)
+                            self.set_image(self.label_selected, display_image)
 
-                    # check_str = input(f"add this mask as obj_id {obj_id} [Y/n] >>>")
-                    if True:
-                        mask = torch.from_numpy(mask)
+                        # check_str = input(f"add this mask as obj_id {obj_id} [Y/n] >>>")
+                        if True:
+                            mask = torch.from_numpy(mask)
 
-                        _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_mask(
-                            inference_state=self.inference_state,
-                            frame_idx=self.ann_frame_idx,
-                            obj_id=obj_id,
-                            mask=mask.squeeze(0)
-                        )
-                        ic(f"[Add mask] append mask in frame_{self.ann_frame_idx}.jpg as obj_id: {obj_id}")
-                    else:
-                        ic("[Skip]")
-            except Exception as e:
-                ic(e)
-                ic("cannot detect target mask")
+                            _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_mask(
+                                inference_state=self.inference_state,
+                                frame_idx=self.ann_frame_idx,
+                                obj_id=obj_id,
+                                mask=mask.squeeze(0)
+                            )
+                            ic(f"[Add mask] append mask in frame_{self.ann_frame_idx}.jpg as obj_id: {obj_id}")
+                        else:
+                            ic("[Skip]")
+                except Exception as e:
+                    ic(e)
+                    ic("cannot detect target mask")
+
+        except Exception as e:  # samurai
+            self.predictor_video.reset_state(self.inference_state)
+            self.all_mask_infos[self.mask_info_idx+1] = {
+                "frame_idx": self.ann_frame_idx,
+                "point": points,
+                "target_mask": None,
+                "ann": None,
+                "labels": np.array([1], np.int32),
+                "obj_id": obj_id
+            }
+            self.mask_info_idx += 1
 
     def delete_obj_id_callback(self, sender: str = None, app_data: str = None) -> None:
         """_summary_
@@ -1245,6 +1294,8 @@ class TrackingViewer(QMainWindow):
 
             # out_obj_ids, out_mask_logits = self.mask_point_generation(self.ann_frame_idx, self.ann_obj_id, height=h, width=w, num_points=16*16, image=image_float)
             # self.ann_obj_id = out_obj_ids[-1]
+
+            _, out_obj_ids, out_mask_logits = self._initialize_mask_infos()
 
             if self.keyframe_interval > 0:
                 ic(f"start frame idx: {max(0, self.ann_frame_idx-self.keyframe_interval)}")
@@ -1489,7 +1540,7 @@ class TrackingViewer(QMainWindow):
 
         interval = self.keyframe_interval
 
-        for idx in range(17, len(self.images), interval):
+        for idx in range(0, len(self.images), interval):
             ic(f"target_frame is {idx}")
             self.change_target_frame_idx(idx)
             self.segment_video_callback()
@@ -1525,7 +1576,7 @@ if __name__ == "__main__":
     parser.add_argument("--viewer_disable", "-v", action="store_false", help="Disable viewer")
     parser.add_argument("--debug", "-d", action="store_true", help="Debug mode")
     parser.add_argument("--frame_number", "-f", action="store_false", help="output video with frame number")
-    parser.add_argument("--keyframe_interval", "-k", default=20, type=int, help="Keyframe interval")
+    parser.add_argument("--keyframe_interval", "-k", default=100, type=int, help="Keyframe interval")
     args = parser.parse_args()
 
     ic(args.gui)
