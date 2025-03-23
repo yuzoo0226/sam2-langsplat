@@ -313,6 +313,6 @@ def visualize_instance(masks: dict) -> np.ndarray:
                 cx = int(M["m10"] / M["m00"])
                 cy = int(M["m01"] / M["m00"])
                 # Draw the label number at the centroid
-                cv2.putText(output_image, str(label), (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255, 255), 1, cv2.LINE_AA)
+                cv2.putText(output_image, str(label), (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 3, (255, 255, 255, 255), 1, cv2.LINE_AA)
 
     return output_image

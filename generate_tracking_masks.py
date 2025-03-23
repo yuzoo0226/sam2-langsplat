@@ -20,7 +20,7 @@ import torch
 # from segment_anything import SamPredictor, sam_model_registry
 from sam2.build_sam import build_sam2_video_predictor, build_sam2
 from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
-from utils.grid_generator import generate_uniform_grid, draw_points_on_image, auto_mask_generator
+from utils.grid_generator import generate_uniform_grid, draw_points_on_image, draw_box_on_image, auto_mask_generator
 from utils.mask_utils import apply_mask_to_rgba_image, apply_mask_to_image, filter_overlapping_masks, combined_all_mask, has_same_mask, calculate_overlap_ratio, visualize_instance
 from utils.clip_utils import OpenCLIPNetwork, OpenCLIPNetworkConfig
 from utils.gpt_utils import OpenAIUtils
@@ -67,20 +67,20 @@ class ClickableLabel(QLabel):
 
 class TrackingViewer(QMainWindow):
 # class TrackingViewer():
-    def __init__(self, image_dir: str, sam_checkpoint: str, sam_config: str, based_gui="dpg", is_viewer=True, is_debug=True, keyframe_interval: int = 0, frame_number: bool = False, feature_type="each") -> None:
+    def __init__(self, image_dir: str, sam_checkpoint: str, sam_config: str, based_gui="dpg", is_viewer=True, is_debug=True, keyframe_interval: int = 0, frame_number: bool = False, feature_type="each", main_image_scale=1) -> None:
         """A GUI application for viewing sorted images with navigation support."""
         super().__init__()
         self.image_dir = image_dir
         self.video_path = None
-        self.images = self._load_images(ext="jpg")
+        self.images = self._load_images(ext="JPG")
         h, w = cv2.imread(self.images[0], 0).shape
         # self.main_image_size = max(h, w)
         # self.sub_image_size = max(h, w) // 2
+        self.main_image_width = int(w / main_image_scale)
+        self.main_image_height = int(h / main_image_scale)
 
-        self.main_image_width = w
-        self.main_image_height = h
-
-        self.show_subimage_scale = 4
+        self.show_main_image_scale = main_image_scale
+        self.show_subimage_scale = 4 * self.show_main_image_scale
         self.sub_image_width = w // self.show_subimage_scale
         self.sub_image_height = h // self.show_subimage_scale
 
@@ -244,6 +244,7 @@ class TrackingViewer(QMainWindow):
         dpg.configure_item(self.next2_image_texture)
 
     def set_main_image(self, image):
+        image = cv2.resize(image, (int(self.main_image_width * (1/self.show_main_image_scale)), int(self.main_image_height * (1/self.show_main_image_scale))), interpolation=cv2.INTER_AREA)
         dpg.set_value(self.select_image_texture, image)
         dpg.configure_item(self.select_image_texture)
 
@@ -291,6 +292,7 @@ class TrackingViewer(QMainWindow):
                 else:
                     image = cv2.imread(self.images[idx])
                     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGBA)
+                    image = cv2.resize(image, (int(self.main_image_width * (1/self.show_main_image_scale)), int(self.main_image_height * (1/self.show_main_image_scale))), interpolation=cv2.INTER_AREA)
                     self.set_image(self.label_selected, image)
 
             if idx - 2 in self.images:
@@ -438,9 +440,9 @@ class TrackingViewer(QMainWindow):
             image,
             model=self.sam_model,
             points_per_side=32,
-            pred_iou_thresh=0.87,
-            box_nms_thresh=0.87,
-            stability_score_thresh=0.87,
+            pred_iou_thresh=0.95,
+            box_nms_thresh=0.95,
+            stability_score_thresh=0.95,
             crop_n_layers=1,
             crop_n_points_downscale_factor=1,
             min_mask_region_area=2000,
@@ -504,6 +506,7 @@ class TrackingViewer(QMainWindow):
                     self.set_main_image(display_image/255)
                 else:
                     display_image = cv2.cvtColor(display_image, cv2.COLOR_RGB2BGRA)
+                    display_image = cv2.resize(display_image, (int(self.main_image_width * (1/self.show_main_image_scale)), int(self.main_image_height * (1/self.show_main_image_scale))), interpolation=cv2.INTER_AREA)
                     self.set_image(self.label_selected, display_image)
                 if self.is_debug:
                     # time.sleep(0.2)
@@ -531,6 +534,7 @@ class TrackingViewer(QMainWindow):
         cv2.imwrite("anns.jpg", img*255)
 
         if self.is_viewer:
+            img = cv2.resize(img, (int(self.main_image_width * (1/self.show_main_image_scale)), int(self.main_image_height * (1/self.show_main_image_scale))), interpolation=cv2.INTER_AREA)
             self.set_image(self.label_selected, img)
             # dpg.set_value(self.select_image_texture, img)
             # dpg.configure_item(self.select_image_texture)
@@ -723,6 +727,7 @@ class TrackingViewer(QMainWindow):
             if self.based_gui == "dpg":
                 self.set_main_image(masked_image/255)
             else:
+                masked_image = cv2.resize(masked_image, (int(self.main_image_width * (1/self.show_main_image_scale)), int(self.main_image_height * (1/self.show_main_image_scale))), interpolation=cv2.INTER_AREA)
                 self.set_image(self.label_selected, masked_image)
         except Exception as e:
             ic(e)
@@ -786,7 +791,7 @@ class TrackingViewer(QMainWindow):
                 image = cv2.imread(self.images[frame_id])
                 current_bgr = apply_mask_to_image(image, current_mask)
                 if self.with_frame_number:
-                    current_bgr = cv2.putText(current_bgr, f"frame_{frame_id}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
+                    current_bgr = cv2.putText(current_bgr, f"frame_{frame_id}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 5, (0, 255, 0), 2, cv2.LINE_AA)
                 mp4_data.append(current_bgr)
                 gif_data.append(cv2.cvtColor(current_bgr, cv2.COLOR_BGR2RGB))
 
@@ -805,15 +810,24 @@ class TrackingViewer(QMainWindow):
             video_writer.release()
 
         output_path = "./language_features/output_instance_visualizer.mp4"
-        video_writer_instance = cv2.VideoWriter(output_path, fourcc, 1, (width*2, height))
-        for idx in range(len(self.frame_names)):
-            image_visualize_instance = visualize_instance(self.video_segments[idx])
-            # try:
-            image_visualize_instance = cv2.cvtColor(image_visualize_instance, cv2.COLOR_RGBA2BGR)
-            image_orig_bgr = cv2.imread(self.images[idx])
-            combined_image = cv2.hconcat([image_orig_bgr, image_visualize_instance])
-            combined_image = cv2.putText(combined_image, f"frame_{idx}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2, cv2.LINE_AA)
-            video_writer_instance.write(combined_image)
+        if (width * 2) > 8100:
+            ic("video width is too large, dump only segmentation results")
+            video_writer_instance = cv2.VideoWriter(output_path, fourcc, 1, (width, height))
+            for idx in range(len(self.frame_names)):
+                image_visualize_instance = visualize_instance(self.video_segments[idx])
+                image_visualize_instance = cv2.cvtColor(image_visualize_instance, cv2.COLOR_RGBA2BGR)
+                video_writer_instance.write(image_visualize_instance)
+
+        else:
+            video_writer_instance = cv2.VideoWriter(output_path, fourcc, 1, (width*2, height))
+
+            for idx in range(len(self.frame_names)):
+                image_visualize_instance = visualize_instance(self.video_segments[idx])
+                image_visualize_instance = cv2.cvtColor(image_visualize_instance, cv2.COLOR_RGBA2BGR)
+                image_orig_bgr = cv2.imread(self.images[idx])
+                combined_image = cv2.hconcat([image_orig_bgr, image_visualize_instance])
+                combined_image = cv2.putText(combined_image, f"frame_{idx}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 5, (0, 255, 0), 2, cv2.LINE_AA)
+                video_writer_instance.write(combined_image)
 
         video_writer_instance.release()
         ic("Video writing completed.")
@@ -836,9 +850,9 @@ class TrackingViewer(QMainWindow):
             for label, mask in masks.items():
                 output_array[3][mask[0]] = label - 1  # obj_idが1から始まるため
 
-            ic(output_path)
-
+            tqdm.tqdm.write(f"output path: {output_path}")
             np.save(output_path, np.array(output_array, dtype=np.float32))
+        ic("complete dump segmentation mask as npy")
 
     def dump_feature_callback(self, sender: str = None, app_data: str = None) -> None:
         """Dump CLIP Features
@@ -887,6 +901,7 @@ class TrackingViewer(QMainWindow):
                 if self.based_gui == "dpg":
                     self.set_main_image(visualized_image/255)
                 else:
+                    visualized_image = cv2.resize(visualized_image, (int(self.main_image_width * (1/self.show_main_image_scale)), int(self.main_image_height * (1/self.show_main_image_scale))), interpolation=cv2.INTER_AREA)
                     self.set_image(self.label_selected, visualized_image)
 
             with torch.no_grad():
@@ -1012,6 +1027,7 @@ class TrackingViewer(QMainWindow):
                 if self.based_gui == "dpg":
                     self.set_main_image(visualized_image/255)
                 else:
+                    visualized_image = cv2.resize(visualized_image, (int(self.main_image_width * (1/self.show_main_image_scale)), int(self.main_image_height * (1/self.show_main_image_scale))), interpolation=cv2.INTER_AREA)
                     self.set_image(self.label_selected, visualized_image)
 
             masked_bgr = apply_mask_to_image(image, target_mask)
@@ -1043,10 +1059,157 @@ class TrackingViewer(QMainWindow):
         except Exception as e:
             return
 
+    def add_prompt_bbox_input(self, sender: str = None, app_data: str = None) -> None:
+        """_summary_
+
+        Args:
+            sender (str, optional): _description_. Defaults to None.
+            app_data (str, optional): _description_. Defaults to None.
+        """
+        x_min = input("x_min >>>")
+        y_min = input("y_min >>>")
+        x_max = input("x_max >>>")
+        y_max = input("y_max >>>")
+
+        try:
+            box = np.array([float(x_min), float(y_min), float(x_max), float(y_max)], dtype=np.float32)
+        except ValueError:
+            print("Invalid number. skip add box prompt")
+
+        obj_id = input("obj_id >>>")
+
+        try:
+            obj_id = int(obj_id)
+        except Exception as e:
+            ic(e)
+            ic("Invalid obj_id is provided, only integer value is acceptable.")
+            return
+
+        _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_points_or_box(
+            inference_state=self.inference_state,
+            frame_idx=self.ann_frame_idx,
+            obj_id=obj_id,
+            box=box
+        )
+
+        print("predicted mask", out_mask_logits)
+
+        image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.ann_frame_idx]))
+        image = draw_box_on_image(image, box=box)
+        cv2.imwrite("temp_box.png", image)
+
+        for idx, mask in enumerate(out_mask_logits):
+            try:
+                image = draw_box_on_image(image, box=box)
+                mask = (mask > 0.0).cpu().numpy()
+                display_image = apply_mask_to_rgba_image(image, mask)
+                cv2.imwrite("temp_anns_rgb.png", display_image)
+                if idx+1 == obj_id:
+                    if self.based_gui == "dpg":
+                        display_image = cv2.cvtColor(display_image, cv2.COLOR_RGB2RGBA)
+                        self.set_main_image(display_image/255)
+                    else:
+                        display_image = cv2.cvtColor(display_image, cv2.COLOR_RGB2BGRA)
+                        display_image = cv2.resize(display_image, (int(self.main_image_width * (1/self.show_main_image_scale)), int(self.main_image_height * (1/self.show_main_image_scale))), interpolation=cv2.INTER_AREA)
+                        self.set_image(self.label_selected, display_image)
+
+                    # check_str = input(f"add this mask as obj_id {obj_id} [Y/n] >>>")
+                    if True:
+                        mask = torch.from_numpy(mask)
+
+                        _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_mask(
+                            inference_state=self.inference_state,
+                            frame_idx=self.ann_frame_idx,
+                            obj_id=obj_id,
+                            mask=mask.squeeze(0)
+                        )
+                        ic(f"[Add mask] append mask in frame_{self.ann_frame_idx}.jpg as obj_id: {obj_id}")
+                    else:
+                        ic("[Skip]")
+            except Exception as e:
+                ic(e)
+                ic("cannot detect target mask")
+
     # ClickableLabel からのクリックイベントを処理
-    def add_obj_prompt_click(self, pos: QPointF):
+    def add_prompt_point_input(self, sender: str = None, app_data: str = None) -> None:
+        """_summary_
+
+        Args:
+            sender (str, optional): _description_. Defaults to None.
+            app_data (str, optional): _description_. Defaults to None.
+        """
+        x = input("x >>>")
+        y = input("y >>>")
+        try:
+            x = float(x)
+            y = float(y)
+        except:
+            ic("invalid input")
+            return False
+
+        print(f"Prompt point: ({x}, {y})")
+        image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.ann_frame_idx]))
+        obj_id = input("obj_id >>")
+        try:
+            obj_id = int(obj_id)
+        except Exception as e:
+            ic(e)
+            ic("Invalid obj_id is provided, only integer value is acceptable.")
+            return False
+
+        points = np.array([[int(x), int(y)]], dtype=np.float32)
+        labels = np.array([1], np.int32)
+
+        print(obj_id)
+        print(type(obj_id))
+
+        _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_points_or_box(
+            inference_state=self.inference_state,
+            frame_idx=self.ann_frame_idx,
+            obj_id=obj_id,
+            points=points,
+            labels=labels,
+            clear_old_points=False
+        )
+
+        for idx, mask in enumerate(out_mask_logits):
+            try:
+                image = draw_points_on_image(image, points=points)
+                mask = (mask > 0.0).cpu().numpy()
+                display_image = apply_mask_to_rgba_image(image, mask)
+                if idx+1 == obj_id:
+                    if self.based_gui == "dpg":
+                        display_image = cv2.cvtColor(display_image, cv2.COLOR_RGB2RGBA)
+                        self.set_main_image(display_image/255)
+                    else:
+                        display_image = cv2.cvtColor(display_image, cv2.COLOR_RGB2BGRA)
+                        display_image = cv2.resize(display_image, (int(self.main_image_width * (1/self.show_main_image_scale)), int(self.main_image_height * (1/self.show_main_image_scale))), interpolation=cv2.INTER_AREA)
+                        self.set_image(self.label_selected, display_image)
+
+                    # check_str = input(f"add this mask as obj_id {obj_id} [Y/n] >>>")
+                    if True:
+                        mask = torch.from_numpy(mask)
+
+                        _, out_obj_ids, out_mask_logits = self.predictor_video.add_new_mask(
+                            inference_state=self.inference_state,
+                            frame_idx=self.ann_frame_idx,
+                            obj_id=obj_id,
+                            mask=mask.squeeze(0)
+                        )
+                        ic(f"[Add mask] append mask in frame_{self.ann_frame_idx}.jpg as obj_id: {obj_id}")
+                    else:
+                        ic("[Skip]")
+            except Exception as e:
+                ic(e)
+                ic("cannot detect target mask")
+
+    # ClickableLabel からのクリックイベントを処理
+    def add_prompt_click_point(self, pos: QPointF):
         x, y = pos.x(), pos.y()
         print(f"MainWindow で受け取ったクリック座標: ({x}, {y})")
+        x = x * self.show_main_image_scale
+        y = y * self.show_main_image_scale
+        print(f"MainWindow で受け取ったクリック座標 (resizeを考慮した値): ({x}, {y})")
         image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.ann_frame_idx]))
         obj_id = input("obj_id >>")
         try:
@@ -1082,6 +1245,7 @@ class TrackingViewer(QMainWindow):
                         self.set_main_image(display_image/255)
                     else:
                         display_image = cv2.cvtColor(display_image, cv2.COLOR_RGB2BGRA)
+                        display_image = cv2.resize(display_image, (int(self.main_image_width * (1/self.show_main_image_scale)), int(self.main_image_height * (1/self.show_main_image_scale))), interpolation=cv2.INTER_AREA)
                         self.set_image(self.label_selected, display_image)
 
                     # check_str = input(f"add this mask as obj_id {obj_id} [Y/n] >>>")
@@ -1112,7 +1276,7 @@ class TrackingViewer(QMainWindow):
         for frame_id, frame_name in enumerate(self.frame_names):
             image = cv2.imread(os.path.join(self.image_dir, frame_name))
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            out_obj_ids, out_mask_logits = self.mask_point_generation(frame_id, 0, height=self.main_image_height, width=self.main_image_width, num_points=16*16, image=image)
+            out_obj_ids, out_mask_logits = self.mask_point_generation(frame_id, 0, height=self.main_image_height, width=self.main_image_width, num_points=64, image=image)
 
             for obj_idx, segment in enumerate(out_mask_logits):
                 _ = self.mask_to_numpy(segment, image, filename=frame_name, anns_obj_id=obj_idx)
@@ -1126,7 +1290,7 @@ class TrackingViewer(QMainWindow):
         """
         ic(self.keyframe_interval)
         image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.ann_frame_idx]))
-        out_obj_ids, out_mask_logits = self.mask_point_generation(self.ann_frame_idx, self.ann_obj_id, height=self.main_image_height, width=self.main_image_width, num_points=16*16, image=image)
+        out_obj_ids, out_mask_logits = self.mask_point_generation(self.ann_frame_idx, self.ann_obj_id, height=self.main_image_height, width=self.main_image_width, num_points=64, image=image)
 
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
             image = cv2.imread(os.path.join(self.image_dir, self.frame_names[self.ann_frame_idx]))
@@ -1238,7 +1402,7 @@ class TrackingViewer(QMainWindow):
         self.blank_sub_image = np.full((self.sub_image_height, self.sub_image_width, 4), 30, dtype=np.uint8)
 
         self.label_selected = ClickableLabel(self)
-        self.label_selected.clicked.connect(self.add_obj_prompt_click)
+        self.label_selected.clicked.connect(self.add_prompt_click_point)
         self.label_before1 = QLabel(self)
         self.label_before2 = QLabel(self)
         self.label_next1 = QLabel(self)
@@ -1339,6 +1503,14 @@ class TrackingViewer(QMainWindow):
         self.delete_obj_id_button.clicked.connect(self.delete_obj_id_callback)
         self.layout.addWidget(self.delete_obj_id_button)
 
+        self.add_box_prompt = QPushButton("Add box prompt")
+        self.add_box_prompt.clicked.connect(self.add_prompt_bbox_input)
+        self.layout.addWidget(self.add_box_prompt)
+
+        self.add_box_prompt = QPushButton("Add point prompt")
+        self.add_box_prompt.clicked.connect(self.add_prompt_point_input)
+        self.layout.addWidget(self.add_box_prompt)
+
         # QLineEdit: テキスト入力ボックス
         self.keyframe_interval_input = QLineEdit(self)
         self.keyframe_interval_input.setPlaceholderText("set keyframe_interval")
@@ -1430,7 +1602,7 @@ class TrackingViewer(QMainWindow):
 
         interval = self.keyframe_interval
 
-        for idx in range(17, len(self.images), interval):
+        for idx in range(0, len(self.images), interval):
             ic(f"target_frame is {idx}")
             self.change_target_frame_idx(idx)
             self.segment_video_callback()
@@ -1465,14 +1637,15 @@ if __name__ == "__main__":
     parser.add_argument("--viewer_disable", "-v", action="store_false", help="Disable viewer")
     parser.add_argument("--debug", "-d", action="store_true", help="Debug mode")
     parser.add_argument("--frame_number", "-f", action="store_false", help="output video with frame number")
-    parser.add_argument("--keyframe_interval", "-k", default=20, type=int, help="Keyframe interval")
+    parser.add_argument("--keyframe_interval", "-k", default=100, type=int, help="Keyframe interval")
+    parser.add_argument("--main_image_scale", "-r", default=1, type=int, help="resize visualize main image factor (1/n)")
     args = parser.parse_args()
 
     ic(args.gui)
     ic(args.viewer_disable)
     if args.viewer_disable:
         app = QApplication(sys.argv)
-    viewer = TrackingViewer(args.input_dir, args.model, args.config, args.gui, args.viewer_disable, is_debug=args.debug, keyframe_interval=args.keyframe_interval, frame_number=args.frame_number, feature_type=args.feature_type)
+    viewer = TrackingViewer(args.input_dir, args.model, args.config, args.gui, args.viewer_disable, is_debug=args.debug, keyframe_interval=args.keyframe_interval, frame_number=args.frame_number, feature_type=args.feature_type, main_image_scale=args.main_image_scale)
     if args.viewer_disable:
         viewer.show()
         sys.exit(app.exec())

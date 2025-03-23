@@ -31,6 +31,21 @@ def draw_points_on_image(image, points, color=(0, 0, 255), radius=3):
     return output_image
 
 
+def draw_box_on_image(image, box=np.array([0, 20, 100, 100], dtype=np.float32), color=(0, 0, 255), thickness=2):
+    """Draw a box on the image.
+
+    Args:
+        image (np.ndarray): The image on which to draw the box.
+        box (np.ndarray, optional): The coordinates of the box in the format [x_min, y_min, x_max, y_max]. Defaults to np.array([0, 20, 100, 100], dtype=np.float32).
+        color (tuple, optional): The color of the box. Defaults to (0, 0, 255).
+        thickness (int, optional): The thickness of the box lines. Defaults to 2.
+    """
+    x_min, y_min, x_max, y_max = box.astype(int)
+    output_image = image.copy()
+    cv2.rectangle(output_image, (x_min, y_min), (x_max, y_max), color, thickness)
+    return output_image
+
+
 def auto_mask_generator(
     image: np.ndarray,
     model: SAM2Base,
