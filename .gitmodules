@@ -1,0 +1,3 @@
+[submodule "third_party/segment-anything-langsplat"]
+	path = third_party/segment-anything-langsplat
+	url = https://github.com/yuzoo0226/segment-anything-langsplat.git
