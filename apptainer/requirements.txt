@@ -1,24 +1,25 @@
 # based on Tracking-Anything Repository
 
-progressbar2
+av
+tqdm
 gdown
+psutil
 gitpython
-git+https://github.com/cheind/py-thin-plate-spline
 hickle
 tensorboard
-numpy
-git+https://github.com/facebookresearch/segment-anything.git
+progressbar2
+numpy==1.24.3
 gradio
-# opencv-python
-matplotlib
 pyyaml
-av
 openmim
-tqdm
-psutil
 dearpygui
+matplotlib
 openai==1.63.2
+icecream
 
+git+https://github.com/cheind/py-thin-plate-spline
+git+https://github.com/facebookresearch/segment-anything.git
+git+https://github.com/yuzoo0226/segment-anything-langsplat.git
 
 gradio==5.0.2
 litserve==0.2.3
@@ -28,5 +29,5 @@ sam-2 @ git+https://github.com/facebookresearch/segment-anything-2@c2ec8e14a1856
 supervision==0.23.0 ; python_full_version > '3.10'
 transformers==4.44.2
 uvloop==0.20.0
-torch==2.4.1
-torchvision==0.19.1
+# torch==2.4.1
+# torchvision==0.19.1
